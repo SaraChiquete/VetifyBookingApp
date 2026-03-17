@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:io';
 import 'database/db_helper.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 /// ---------------- MODELOS ----------------
 class Usuario {
@@ -10,7 +11,7 @@ class Usuario {
   String nombre;
   String email;
   String rol;
-  String? foto; 
+  String? foto;
 
   Usuario({required this.id, required this.nombre, required this.email, this.rol = 'cliente', this.foto,});
 }
@@ -64,88 +65,135 @@ class AppProvider with ChangeNotifier {
   List<Cita> citas = [];
   Usuario? usuarioActual;
 
-Future registrarUsuario(Usuario usuario) async {
+  Future registrarUsuario(Usuario usuario, String password) async {
+    // 1. Crear cuenta en Supabase Auth
+    final response = await supabase.auth.signUp(
+      email: usuario.email,
+      password: password,
+    );
 
-  final db = await DBHelper.database;
+    if (response.user == null) throw Exception('Error al registrar');
 
-  await db.insert('usuarios', {
-    'id': usuario.id,
-    'nombre': usuario.nombre,
-    'email': usuario.email,
-  });
+    // 2. Guardar perfil en tu tabla 'usuarios'
+    await supabase.from('usuarios').insert({
+      'id': response.user!.id, // Usar el ID de Supabase
+      'nombre': usuario.nombre,
+      'email': usuario.email,
+      'rol': usuario.rol,
+    });
 
-  usuarios.add(usuario);
-  notifyListeners();
-}
+    usuario = Usuario(
+      id: response.user!.id,
+      nombre: usuario.nombre,
+      email: usuario.email,
+    );
 
-  Future<bool> login(String email) async {
-
-  final db = await DBHelper.database;
-
-  final result = await db.query(
-    'usuarios',
-    where: 'email = ?',
-    whereArgs: [email],
-  );
-
-  if (result.isEmpty) return false;
-
-  final data = result.first;
-
- usuarioActual = Usuario(
-  id: data['id']?.toString() ?? '',
-  nombre: data['nombre']?.toString() ?? '',
-  email: data['email']?.toString() ?? '',
-  rol: data['rol']?.toString() ?? '',
-  foto: data['foto']?.toString(),
-);
-  notifyListeners();
-
-  return true;
-}
-
-  void logout() {
-    usuarioActual = null;
+    usuarioActual = usuario;
     notifyListeners();
   }
 
- Future agregarMascota(Mascota mascota) async {
+Future<bool> login(String email, String password) async {
+    final response = await supabase.auth.signInWithPassword(
+      email: email,
+      password: password,
+    );
 
-  final db = await DBHelper.database;
+    if (response.user == null) return false;
 
-  await db.insert('mascotas', {
-    'id': mascota.id,
-    'nombre': mascota.nombre,
-    'especie': mascota.especie,
-    'raza': mascota.raza,
-    'edad': mascota.edad,
-    'peso': mascota.peso,
-    'sexo': mascota.sexo,
-    'color': mascota.color,
-    'usuarioId': usuarioActual!.id
-  });
+    final data = await supabase
+        .from('usuarios')
+        .select()
+        .eq('id', response.user!.id)
+        .single();
 
-  mascotas.add(mascota);
-  notifyListeners();
-}
+    usuarioActual = Usuario(
+      id: data['id'],
+      nombre: data['nombre'],
+      email: data['email'],
+      rol: data['rol'] ?? 'cliente',
+      foto: data['foto'],
+    );
 
- Future agregarCita(Cita cita) async {
+    // Cargar mascotas
+    final mascotasData = await supabase
+        .from('mascotas')
+        .select()
+        .eq('usuarioId', response.user!.id);
 
-  final db = await DBHelper.database;
+    mascotas = (mascotasData as List).map((m) => Mascota(
+      id: m['id'],
+      nombre: m['nombre'],
+      especie: m['especie'],
+      raza: m['raza'],
+      edad: m['edad'],
+      peso: m['peso'],
+      sexo: m['sexo'],
+      color: m['color'],
+    )).toList();
 
-  await db.insert('citas', {
-    'id': cita.id,
-    'clienteId': cita.clienteId,
-    'mascotaId': cita.mascotaId,
-    'fecha': cita.fecha.toIso8601String(),
-    'veterinario': cita.veterinario,
-    'servicio': cita.servicio,
-    'estado': cita.estado
-  });
+    // Cargar citas
+    final citasData = await supabase
+        .from('citas')
+        .select()
+        .eq('clienteId', response.user!.id);
 
-  citas.add(cita);
-  notifyListeners();
-}
+    citas = (citasData as List).map((c) => Cita(
+      id: c['id'],
+      clienteId: c['clienteId'],
+      mascotaId: c['mascotaId'],
+      fecha: DateTime.parse(c['fecha']),
+      veterinario: c['veterinario'],
+      servicio: c['servicio'],
+      estado: c['estado'],
+    )).toList();
+
+    notifyListeners();
+    return true;
+  }
+
+  void logout() async {
+    await supabase.auth.signOut();
+    usuarioActual = null;
+    mascotas = [];
+    citas = [];
+    notifyListeners();
+  }
+
+  Future agregarMascota(Mascota mascota) async {
+    if (usuarioActual == null) throw Exception('No hay sesión activa');
+
+    await supabase.from('mascotas').insert({
+      'id': mascota.id,
+      'nombre': mascota.nombre,
+      'especie': mascota.especie,
+      'raza': mascota.raza,
+      'edad': mascota.edad,
+      'peso': mascota.peso,
+      'sexo': mascota.sexo,
+      'color': mascota.color,
+      'usuarioId': usuarioActual!.id,
+    });
+
+    mascotas.add(mascota);
+    notifyListeners();
+  }
+
+  Future agregarCita(Cita cita) async {
+    if (usuarioActual == null) throw Exception('No hay sesión activa');
+
+    await supabase.from('citas').insert({
+      'id': cita.id,
+      'clienteId': cita.clienteId,
+      'mascotaId': cita.mascotaId,
+      'fecha': cita.fecha.toIso8601String(),
+      'veterinario': cita.veterinario,
+      'servicio': cita.servicio,
+      'estado': cita.estado,
+    });
+
+    citas.add(cita);
+    notifyListeners();
+  }
 
   List<Cita> obtenerCitasUsuario(String clienteId) {
     return citas.where((c) => c.clienteId == clienteId).toList();
@@ -166,6 +214,8 @@ void actualizarPerfil(String nombre, String email, String? foto) {
 class LoginScreen extends StatelessWidget {
   final TextEditingController emailController = TextEditingController();
   final TextEditingController conController = TextEditingController();
+
+  LoginScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -201,6 +251,9 @@ class LoginScreen extends StatelessWidget {
                         style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold, color:const Color.fromARGB(255, 0, 50, 92))),
                          TextField(
                         controller: emailController,
+                        keyboardType: TextInputType.emailAddress,
+                        autocorrect: false,
+                        enableSuggestions: false,
                         decoration: InputDecoration(
                           labelText: 'Email',
                           border: OutlineInputBorder(),
@@ -235,17 +288,43 @@ class LoginScreen extends StatelessWidget {
                       style: ElevatedButton.styleFrom(
                         minimumSize: Size(double.infinity, 50),
                         backgroundColor: Colors.blue,
-                        foregroundColor: Colors.white, 
+                        foregroundColor: Colors.white,
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(15)),
                       ),
                       child: Text('Iniciar Sesión'),
                       onPressed: () async {
-                        if (await app.login(emailController.text)) {
-                          Navigator.pushReplacement(context,MaterialPageRoute(builder: (_) => HomeScreen()),
+                        try {
+                          final ok = await app.login(
+                            emailController.text.trim(),
+                            conController.text.trim(),
                           );
-                        } else {
+
+                          if (ok) {
+                            Navigator.pushReplacement(context,
+                                MaterialPageRoute(builder: (_) => HomeScreen()));
+                          } else {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text('Credenciales incorrectas')),
+                            );
+                          }
+                        } catch (e) {
+                          print('ERROR LOGIN: $e');
+                          String mensaje = 'Error al iniciar sesión';
+
+                          if (e.toString().contains('Email not confirmed')) {
+                            mensaje = 'Debes confirmar tu email antes de entrar';
+                          } else if (e.toString().contains('Invalid login credentials')) {
+                            mensaje = 'Email o contraseña incorrectos';
+                          } else if (e.toString().contains('rate limit')) {
+                            mensaje = 'Demasiados intentos, espera unos minutos';
+                          }
+
                           ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('Usuario no encontrado')),
+                            SnackBar(
+                              content: Text(mensaje),
+                              backgroundColor: Colors.red,
+                              duration: Duration(seconds: 6),
+                            ),
                           );
                         }
                       },
@@ -267,6 +346,9 @@ class RegisterScreen extends StatelessWidget {
   final TextEditingController contraController = TextEditingController();
   final TextEditingController nacController = TextEditingController();
   final TextEditingController genContorller = TextEditingController();
+  final TextEditingController confirmarContraController = TextEditingController();
+
+  RegisterScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
@@ -310,13 +392,16 @@ class RegisterScreen extends StatelessWidget {
                         )),
                     SizedBox(height: 10),
                     TextField(
-                        controller: emailController,
-                        decoration: InputDecoration(
-                          labelText: 'Email',
-                          border: OutlineInputBorder(),
-                          prefixIcon: Icon(Icons.email),
-                        )),
-                      SizedBox(height: 10),
+                      controller: emailController,
+                      keyboardType: TextInputType.emailAddress,
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      decoration: InputDecoration(
+                        labelText: 'Email',
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.email),
+                      ),
+                    ),
 
                     TextField(
                       controller: contraController,
@@ -325,6 +410,18 @@ class RegisterScreen extends StatelessWidget {
                         labelText: 'Contraseña',
                         border: OutlineInputBorder(),
                         prefixIcon: Icon(Icons.lock),
+                      ),
+                    ),
+
+                    SizedBox(height: 10),
+
+                    TextField(
+                      controller: confirmarContraController,
+                      obscureText: true,
+                      decoration: InputDecoration(
+                        labelText: 'Confirmar contraseña',
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.lock_outline),
                       ),
                     ),
 
@@ -362,30 +459,69 @@ class RegisterScreen extends StatelessWidget {
                         'Registrar',
                         style: TextStyle(color: Colors.white),
                       ),
-                      onPressed: () {
+                      onPressed: () async {
+                        // Validación básica de campos vacíos
                         if (nombreController.text.isEmpty ||
                             emailController.text.isEmpty ||
-                            contraController.text.isEmpty ||
-                            nacController.text.isEmpty ||
-                            genContorller.text.isEmpty) {
+                            contraController.text.isEmpty) {
                           ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('Completa todos los campos')),
+                            SnackBar(content: Text('Por favor llena todos los campos')),
                           );
                           return;
                         }
 
-                        final nuevoUsuario = Usuario(
-                          id: DateTime.now().toString(),
-                          nombre: nombreController.text,
-                          email: emailController.text,
-                        );
+                        if (contraController.text.length < 6) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('La contraseña debe tener al menos 6 caracteres'),
+                              backgroundColor: Colors.red,
+                            ),
+                          );
+                          return;
+                        }
 
-                        app.registrarUsuario(nuevoUsuario);
-                        app.usuarioActual = nuevoUsuario;
-                        Navigator.pushReplacement(
-                          context,
-                          MaterialPageRoute(builder: (_) => HomeScreen()),
-                        );
+                        // Validación de coincidencia
+                        if (contraController.text != confirmarContraController.text) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('Las contraseñas no coinciden'),
+                              backgroundColor: Colors.red,
+                            ),
+                          );
+                          return;
+                        }
+
+                        try {
+                          final nuevoUsuario = Usuario(
+                            id: '',
+                            nombre: nombreController.text.trim(),
+                            email: emailController.text.trim(),
+                          );
+
+                          await app.registrarUsuario(nuevoUsuario, contraController.text.trim());
+
+                          Navigator.pushReplacement(context,
+                              MaterialPageRoute(builder: (_) => HomeScreen()));
+
+                        } catch (e) {
+                          print('ERROR REGISTRO: $e');
+                          String mensaje = 'Error al registrar';
+
+                          if (e.toString().contains('already registered')) {
+                            mensaje = 'Este email ya está registrado';
+                          } else if (e.toString().contains('Password should be')) {
+                            mensaje = 'La contraseña debe tener al menos 6 caracteres';
+                          } else if (e.toString().contains('Invalid email')) {
+                            mensaje = 'El email no es válido';
+                          }
+
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text(mensaje),
+                              backgroundColor: Colors.red,
+                            ),
+                          );
+                        }
                       },
                     ),
                   ],
@@ -400,6 +536,8 @@ class RegisterScreen extends StatelessWidget {
 }
 /// ---------------- DASHBOARD ----------------
 class DashboardScreen extends StatelessWidget {
+  const DashboardScreen({super.key});
+
   @override
   Widget build(BuildContext context) {
     final app = Provider.of<AppProvider>(context);
@@ -487,6 +625,8 @@ class DashboardScreen extends StatelessWidget {
 
 /// ---------------- HOME SCREEN ----------------
 class HomeScreen extends StatefulWidget {
+  const HomeScreen({super.key});
+
   @override
   _HomeScreenState createState() => _HomeScreenState();
 }
@@ -554,7 +694,7 @@ String sexoSeleccionado = 'Macho';
       bottomNavigationBar: BottomAppBar(
         shape: CircularNotchedRectangle(),
         notchMargin: 8,
-        child: Container(
+        child: SizedBox(
           height: 60,
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceAround,
@@ -584,21 +724,59 @@ String sexoSeleccionado = 'Macho';
           ),
         ),
       ),
-      
     );
   }
-  Future seleccionarFotoPerfil() async {
-  final XFile? imagen = await picker.pickImage(source: ImageSource.gallery);
 
-  if (imagen != null) {
+Future seleccionarFotoPerfil() async {
+  final XFile? imagen = await picker.pickImage(source: ImageSource.gallery);
+  if (imagen == null) return;
+
+  final app = Provider.of<AppProvider>(context, listen: false);
+  final userId = app.usuarioActual?.id;
+  if (userId == null) return;
+
+  try {
+    final file = File(imagen.path);
+    final extension = imagen.path.split('.').last;
+    final path = 'perfil/$userId.$extension';
+
+    // Subir a Supabase Storage
+    await supabase.storage.from('avatars').upload(
+      path,
+      file,
+      fileOptions: FileOptions(upsert: true),
+    );
+
+    // Obtener URL pública
+    final url = supabase.storage.from('avatars').getPublicUrl(path);
+
+    // Guardar URL en la tabla usuarios
+    await supabase.from('usuarios').update({'foto': url}).eq('id', userId);
+
+    // Actualizar estado local
     setState(() {
-      imagenPerfil = File(imagen.path);
+      imagenPerfil = file;
     });
+
+    app.actualizarPerfil(
+      app.usuarioActual!.nombre,
+      app.usuarioActual!.email,
+      url,
+    );
+
+  } catch (e) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Error al subir la foto'),
+        backgroundColor: Colors.red,
+      ),
+    );
   }
 }
 
   // ---------------- PANTALLA INICIO ----------------
   Widget _inicio(AppProvider app) {
+  if (app.usuarioActual == null) return Center(child: Text('Sesión no iniciada'));
   final citas = app.obtenerCitasUsuario(app.usuarioActual!.id);
 
   return SingleChildScrollView(
@@ -791,7 +969,7 @@ Widget _citas(AppProvider app) {
 
             /// 🔹 MOTIVO
             DropdownButtonFormField<String>(
-              value: motivoSeleccionado,
+              initialValue: motivoSeleccionado,
               decoration: InputDecoration(
                 labelText: "Motivo de la cita",
                 prefixIcon: const Icon(Icons.pets),
@@ -816,7 +994,7 @@ Widget _citas(AppProvider app) {
 
             /// 🔹 VETERINARIO
             DropdownButtonFormField<String>(
-              value: veterinarioSeleccionado,
+              initialValue: veterinarioSeleccionado,
               decoration: InputDecoration(
                 labelText: "Seleccionar Veterinario",
                 prefixIcon: const Icon(Icons.medical_services),
@@ -1056,7 +1234,6 @@ Widget _citas(AppProvider app) {
         SizedBox(height: 20),
 
         ElevatedButton(
-          child: Text("Registrar Mascota"),
           style: ElevatedButton.styleFrom(
             backgroundColor: Colors.blue,
             minimumSize: Size(double.infinity, 50),
@@ -1089,6 +1266,7 @@ Widget _citas(AppProvider app) {
               imagenMascota = null;
             });
           },
+          child: Text("Registrar Mascota"),
         ),
 
         SizedBox(height: 30),
@@ -1146,7 +1324,7 @@ Widget _perfil(AppProvider app) {
             backgroundImage: imagenPerfil != null
                 ? FileImage(imagenPerfil!)
                 : (usuario?.foto != null
-                    ? FileImage(File(usuario!.foto!))
+                    ? NetworkImage(usuario!.foto!) as ImageProvider
                     : null),
             child: (imagenPerfil == null && usuario?.foto == null)
                 ? Icon(Icons.camera_alt, size: 40)
@@ -1250,7 +1428,14 @@ Widget _perfil(AppProvider app) {
 
 }
 /// ---------------- APP PRINCIPAL ----------------
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  await Supabase.initialize(
+    url: 'https://vgebmmsazwirthdoffuc.supabase.co',
+    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZnZWJtbXNhendpcnRoZG9mZnVjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1MzE4MzIsImV4cCI6MjA4OTEwNzgzMn0.MX4Lcj4lFhpTITucYYXnLm6BI3nj4L4WK1xmpg8Mvug',
+  );
+
   runApp(
     ChangeNotifierProvider(
       create: (_) => AppProvider(),
@@ -1258,9 +1443,13 @@ void main() {
         debugShowCheckedModeBanner: false,
         title: 'Clínica Veterinaria',
         theme: ThemeData(primarySwatch: Colors.blue),
-        home: LoginScreen(),
+        home: supabase.auth.currentSession != null
+            ? HomeScreen()
+            : LoginScreen(),
       ),
     ),
   );
 }
 
+// Helper global para acceder al cliente
+final supabase = Supabase.instance.client;
