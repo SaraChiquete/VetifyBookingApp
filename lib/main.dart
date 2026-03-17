@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:io';
-import 'database/db_helper.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 /// ---------------- MODELOS ----------------
@@ -208,7 +207,67 @@ void actualizarPerfil(String nombre, String email, String? foto) {
     notifyListeners();
   }
 }
+
+Future<bool> cargarSesion() async {
+  final session = supabase.auth.currentSession;
+  if (session == null) return false;
+
+  try {
+    final data = await supabase
+        .from('usuarios')
+        .select()
+        .eq('id', session.user.id)
+        .single();
+
+    usuarioActual = Usuario(
+      id: data['id'],
+      nombre: data['nombre'],
+      email: data['email'],
+      rol: data['rol'] ?? 'cliente',
+      foto: data['foto'],
+    );
+
+    final mascotasData = await supabase
+        .from('mascotas')
+        .select()
+        .eq('usuarioId', session.user.id);
+
+    mascotas = (mascotasData as List).map((m) => Mascota(
+      id: m['id'],
+      nombre: m['nombre'],
+      especie: m['especie'],
+      raza: m['raza'],
+      edad: m['edad'],
+      peso: m['peso'],
+      sexo: m['sexo'],
+      color: m['color'],
+    )).toList();
+
+    final citasData = await supabase
+        .from('citas')
+        .select()
+        .eq('clienteId', session.user.id);
+
+    citas = (citasData as List).map((c) => Cita(
+      id: c['id'],
+      clienteId: c['clienteId'],
+      mascotaId: c['mascotaId'],
+      fecha: DateTime.parse(c['fecha']),
+      veterinario: c['veterinario'],
+      servicio: c['servicio'],
+      estado: c['estado'],
+    )).toList();
+
+    notifyListeners();
+    return true;
+  } catch (e) {
+    print('ERROR cargarSesion: $e');
+    return false;
+  }
 }
+}
+
+
 
 /// ---------------- LOGIN ----------------
 class LoginScreen extends StatelessWidget {
@@ -1425,7 +1484,51 @@ Widget _perfil(AppProvider app) {
     ),
   );
 }
+}
 
+class SplashScreen extends StatefulWidget {
+  const SplashScreen({super.key});
+
+  @override
+  State<SplashScreen> createState() => _SplashScreenState();
+}
+
+class _SplashScreenState extends State<SplashScreen> {
+  @override
+  void initState() {
+    super.initState();
+    _verificarSesion();
+  }
+
+  Future _verificarSesion() async {
+    final app = Provider.of<AppProvider>(context, listen: false);
+    final haySession = await app.cargarSesion();
+
+    if (!mounted) return;
+
+    Navigator.pushReplacement(
+      context,
+      MaterialPageRoute(
+        builder: (_) => haySession ? HomeScreen() : LoginScreen(),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Image.asset('assets/logo.png', width: 200),
+            SizedBox(height: 20),
+            CircularProgressIndicator(color: Colors.blue),
+          ],
+        ),
+      ),
+    );
+  }
 }
 /// ---------------- APP PRINCIPAL ----------------
 void main() async {
@@ -1443,9 +1546,7 @@ void main() async {
         debugShowCheckedModeBanner: false,
         title: 'Clínica Veterinaria',
         theme: ThemeData(primarySwatch: Colors.blue),
-        home: supabase.auth.currentSession != null
-            ? HomeScreen()
-            : LoginScreen(),
+        home: SplashScreen(),  // ← cambia esto
       ),
     ),
   );
