@@ -12,8 +12,24 @@ import 'package:share_plus/share_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:async';
 
-// ════════════════════════════════════════════════════════════════
-//  SUPABASE  ← instancia global
+class Veterinario {
+  final String id, nombre;
+  final String? especialidad, foto;
+
+  Veterinario({
+    required this.id,
+    required this.nombre,
+    this.especialidad,
+    this.foto,
+  });
+
+  factory Veterinario.fromJson(Map<String, dynamic> j) => Veterinario(
+    id:           j['id'],
+    nombre:       j['nombre'],
+    especialidad: j['especialidad'],
+    foto:         j['foto_url'],
+  );
+}
 // ════════════════════════════════════════════════════════════════
 final supabase = Supabase.instance.client;
 
@@ -189,10 +205,11 @@ class Vacuna {
 // ════════════════════════════════════════════════════════════════
 
 class AppProvider with ChangeNotifier {
-  List<Mascota>      mascotas = [];
-  List<Cita>         citas    = [];
-  List<VisitaMedica> visitas  = [];
-  List<Vacuna>       vacunas  = [];
+  List<Mascota>      mascotas    = [];
+  List<Cita>         citas       = [];
+  List<VisitaMedica> visitas     = [];
+  List<Vacuna>       vacunas     = [];
+  List<Veterinario>  veterinarios = [];
   Usuario?           usuarioActual;
   bool               cargando = false;
 
@@ -263,6 +280,12 @@ class AppProvider with ChangeNotifier {
     if (uid == null) return;
     cargando = true; notifyListeners();
     try {
+      // cargar veterinarios (datos publicos)
+      final vetRows = await supabase.from('veterinarios')
+          .select().eq('activo', true).order('nombre');
+      veterinarios = (vetRows as List)
+          .map((r) => Veterinario.fromJson(r)).toList();
+
       final mRows = await supabase.from('mascotas')
           .select().eq('user_id', uid!);
       mascotas = (mRows as List).map((r) => Mascota.fromJson(r)).toList();
@@ -292,28 +315,55 @@ class AppProvider with ChangeNotifier {
     String? foto, String? tel, String? dir, String? nac, String? gen,
   }) async {
     if (uid == null) return;
+    // subir foto si es ruta local
+    String? fotoUrl = foto;
+    if (foto != null && !foto.startsWith('http')) {
+      fotoUrl = await _subirFoto(foto, 'perfiles');
+    }
     await supabase.from('profiles').upsert({
       'id': uid, 'nombre': nombre,
       'telefono': tel, 'direccion': dir,
       'fecha_nacimiento': nac, 'genero': gen,
-      if (foto != null) 'foto_url': foto,
+      if (fotoUrl != null) 'foto_url': fotoUrl,
     });
     usuarioActual?.nombre = nombre;
     usuarioActual?.email  = email;
-    if (tel  != null) usuarioActual?.telefono        = tel;
-    if (dir  != null) usuarioActual?.direccion       = dir;
-    if (nac  != null) usuarioActual?.fechaNacimiento = nac;
-    if (gen  != null) usuarioActual?.genero          = gen;
-    if (foto != null) usuarioActual?.foto            = foto;
+    if (tel     != null) usuarioActual?.telefono        = tel;
+    if (dir     != null) usuarioActual?.direccion       = dir;
+    if (nac     != null) usuarioActual?.fechaNacimiento = nac;
+    if (gen     != null) usuarioActual?.genero          = gen;
+    if (fotoUrl != null) usuarioActual?.foto            = fotoUrl;
     notifyListeners();
+  }
+
+  // ── Subir foto a Supabase Storage ───────────────
+
+  Future<String?> _subirFoto(String rutaLocal, String bucket) async {
+    try {
+      final file      = File(rutaLocal);
+      final extension = rutaLocal.split('.').last.toLowerCase();
+      final nombre    = '${uid}_${DateTime.now().millisecondsSinceEpoch}.$extension';
+      await supabase.storage.from(bucket).upload(nombre, file,
+          fileOptions: FileOptions(contentType: 'image/$extension', upsert: true));
+      final url = supabase.storage.from(bucket).getPublicUrl(nombre);
+      return url;
+    } catch (_) {
+      return null;
+    }
   }
 
   // ── Mascotas ─────────────────────────────────────
 
   Future<void> agregarMascota(Mascota m) async {
     if (uid == null) return;
-    final row = await supabase.from('mascotas')
-        .insert(m.toJson(uid!)).select().single();
+    // subir foto si es ruta local
+    String? fotoUrl;
+    if (m.foto != null && !m.foto!.startsWith('http')) {
+      fotoUrl = await _subirFoto(m.foto!, 'mascotas');
+    }
+    final data = m.toJson(uid!);
+    if (fotoUrl != null) data['foto_url'] = fotoUrl;
+    final row = await supabase.from('mascotas').insert(data).select().single();
     mascotas.add(Mascota.fromJson(row));
     notifyListeners();
   }
@@ -321,11 +371,16 @@ class AppProvider with ChangeNotifier {
   Future<void> editarMascota(String id, String nombre, String especie,
       String raza, String edad, String peso, String sexo, String color,
       String? microchip, String? foto) async {
+    // subir foto nueva si es ruta local
+    String? fotoUrl = foto;
+    if (foto != null && !foto.startsWith('http')) {
+      fotoUrl = await _subirFoto(foto, 'mascotas');
+    }
     await supabase.from('mascotas').update({
       'nombre': nombre, 'especie': especie, 'raza': raza,
       'edad': edad, 'peso': peso, 'sexo': sexo, 'color': color,
       'microchip': microchip,
-      if (foto != null) 'foto_url': foto,
+      if (fotoUrl != null) 'foto_url': fotoUrl,
     }).eq('id', id);
     final i = mascotas.indexWhere((m) => m.id == id);
     if (i != -1) {
@@ -333,7 +388,7 @@ class AppProvider with ChangeNotifier {
         ..nombre = nombre ..especie = especie ..raza = raza
         ..edad = edad ..peso = peso ..sexo = sexo ..color = color
         ..microchip = microchip
-        ..foto = foto ?? mascotas[i].foto;
+        ..foto = fotoUrl ?? mascotas[i].foto;
     }
     notifyListeners();
   }
@@ -348,8 +403,11 @@ class AppProvider with ChangeNotifier {
 
   Future<void> agregarCita(Cita c) async {
     if (uid == null) return;
-    final row = await supabase.from('citas')
-        .insert(c.toJson(uid!)).select().single();
+    final data = c.toJson(uid!);
+    // guardar veterinario_id si existe
+    final vet = veterinarios.where((v) => v.nombre == c.veterinario).firstOrNull;
+    if (vet != null) data['veterinario_id'] = vet.id;
+    final row = await supabase.from('citas').insert(data).select().single();
     citas.add(Cita.fromJson(row));
     notifyListeners();
   }
@@ -362,8 +420,23 @@ class AppProvider with ChangeNotifier {
 
   List<Cita> citasDeUsuario(String _) => citas;
 
-  bool horarioOcupado(DateTime fecha, String vet) =>
-      citas.any((c) => c.fecha == fecha && c.veterinario == vet && c.estado != 'Cancelada');
+  // RF7+RF8: verifica en BD si el horario ya esta ocupado
+  bool horarioOcupado(DateTime fecha, String vetNombre) {
+    return citas.any((c) =>
+        c.fecha == fecha &&
+        c.veterinario == vetNombre &&
+        c.estado != 'Cancelada');
+  }
+
+  // verifica disponibilidad del veterinario en esa fecha (dia de semana)
+  bool vetDisponible(String vetNombre, DateTime fecha) {
+    final vet = veterinarios.where((v) => v.nombre == vetNombre).firstOrNull;
+    if (vet == null) return true; // si no hay datos, asume disponible
+    // dia 1=Lunes ... 7=Domingo en DateTime, pero en nuestra tabla 1=Lunes...6=Sabado
+    final diaSemana = fecha.weekday; // 1=Mon ... 7=Sun
+    if (diaSemana == 7) return false; // domingo no hay servicio
+    return true; // los horarios los filtramos visualmente
+  }
 
   // ── Historial medico ─────────────────────────────
 
@@ -657,10 +730,7 @@ class _HomeScreenState extends State<HomeScreen> {
     'Consulta General','Vacunacion','Desparasitacion',
     'Cirugia','Emergencia','Bano y Grooming',
   ];
-  static const _vets = [
-    'Dr. Carlos Ramirez','Dra. Sofia Mendoza',
-    'Dr. Andres Lopez','Dra. Valeria Torres',
-  ];
+  // veterinarios ya no son fijos — vienen de app.veterinarios (Supabase)
   static const _especies = ['Perro','Gato','Conejo','Ave','Reptil','Otro'];
   static const _sexos    = ['Macho','Hembra'];
   static const _tips = [
@@ -877,7 +947,9 @@ class _HomeScreenState extends State<HomeScreen> {
                                 shape: BoxShape.circle,
                                 image: m.foto != null
                                     ? DecorationImage(
-                                        image: FileImage(File(m.foto!)),
+                                        image: m.foto!.startsWith('http')
+                                            ? NetworkImage(m.foto!) as ImageProvider
+                                            : FileImage(File(m.foto!)),
                                         fit: BoxFit.cover)
                                     : null,
                               ),
@@ -1024,9 +1096,46 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
 
-            // servicios
-            const SizedBox(height: 24),
-            _secTitle('Nuestros Servicios'),
+            // acceso rapido a expediente RF16
+            const SizedBox(height: 16),
+            GestureDetector(
+              onTap: () => Navigator.push(context,
+                  MaterialPageRoute(builder: (_) => ExpedienteScreen(app: app))),
+              child: Container(
+                width: double.infinity, padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF1B5E20), Color(0xFF43A047)],
+                    begin: Alignment.topLeft, end: Alignment.bottomRight,
+                  ),
+                  borderRadius: BorderRadius.circular(18),
+                  boxShadow: [BoxShadow(
+                      color: const Color(0xFF1B5E20).withOpacity(0.3),
+                      blurRadius: 10, offset: const Offset(0, 4))],
+                ),
+                child: Row(children: [
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.2),
+                        borderRadius: BorderRadius.circular(14)),
+                    child: const Icon(Icons.folder_shared, color: Colors.white, size: 26),
+                  ),
+                  const SizedBox(width: 14),
+                  const Expanded(child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('Expediente Clinico',
+                        style: TextStyle(color: Colors.white,
+                            fontWeight: FontWeight.bold, fontSize: 15)),
+                    SizedBox(height: 2),
+                    Text('Ver y descargar historial completo en PDF',
+                        style: TextStyle(color: Colors.white70, fontSize: 12)),
+                  ])),
+                  const Icon(Icons.arrow_forward_ios,
+                      color: Colors.white70, size: 16),
+                ]),
+              ),
+            ),
             const SizedBox(height: 10),
             GridView.count(
               shrinkWrap: true,
@@ -1147,7 +1256,28 @@ class _HomeScreenState extends State<HomeScreen> {
               style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
               overflow: TextOverflow.ellipsis)),
           GestureDetector(
-            onTap: () => app.cancelarCita(cita.id),
+            onTap: () async {
+              final confirmar = await showDialog<bool>(
+                context: context,
+                builder: (_) => AlertDialog(
+                  shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(20)),
+                  title: const Text('Cancelar cita'),
+                  content: const Text(
+                      'Seguro que deseas cancelar esta cita?'),
+                  actions: [
+                    TextButton(
+                        onPressed: () => Navigator.pop(context, false),
+                        child: const Text('No')),
+                    TextButton(
+                        onPressed: () => Navigator.pop(context, true),
+                        child: const Text('Si, cancelar',
+                            style: TextStyle(color: Colors.red))),
+                  ],
+                ),
+              );
+              if (confirmar == true) await app.cancelarCita(cita.id);
+            },
             child: const Icon(Icons.close, color: Colors.red, size: 18),
           ),
         ]),
@@ -1231,13 +1361,43 @@ class _HomeScreenState extends State<HomeScreen> {
           onChanged: (v) => setState(() => _motivo = v),
         ),
         const SizedBox(height: 12),
-        _drop<String>(
-          value: _veterinario, label: 'Veterinario',
-          icon: Icons.person_outline,
-          items: _vets.map((v) =>
-              DropdownMenuItem(value: v, child: Text(v))).toList(),
-          onChanged: (v) => setState(() => _veterinario = v),
-        ),
+        // dropdown veterinario desde BD
+        app.veterinarios.isEmpty
+            ? Container(
+                padding: const EdgeInsets.all(14),
+                decoration: _cardDeco(),
+                child: const Row(children: [
+                  SizedBox(width: 16, height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2)),
+                  SizedBox(width: 10),
+                  Text('Cargando veterinarios...',
+                      style: TextStyle(color: Colors.grey, fontSize: 13)),
+                ]),
+              )
+            : _drop<String>(
+                value: _veterinario,
+                label: 'Veterinario',
+                icon: Icons.person_outline,
+                items: app.veterinarios.map((v) => DropdownMenuItem(
+                  value: v.nombre,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(v.nombre,
+                          style: const TextStyle(fontWeight: FontWeight.w600)),
+                      if (v.especialidad != null)
+                        Text(v.especialidad!,
+                            style: const TextStyle(
+                                fontSize: 11, color: Colors.grey)),
+                    ],
+                  ),
+                )).toList(),
+                onChanged: (v) => setState(() {
+                  _veterinario = v;
+                  _horaCita = ''; // reset hora al cambiar vet
+                }),
+              ),
         const SizedBox(height: 20),
         _secTitle('Fecha'),
         const SizedBox(height: 8),
@@ -1335,18 +1495,17 @@ class _HomeScreenState extends State<HomeScreen> {
             onPressed: (_mascotaCitaId == null || _motivo == null ||
                 _veterinario == null || _horaCita.isEmpty)
                 ? null
-                : () {
+                : () async {
                     final pp = _horaCita.split(':');
                     final hh = int.tryParse(pp[0]) ?? 0;
                     final mm = int.tryParse(pp[1]) ?? 0;
                     final fc = DateTime(_fechaCita.year, _fechaCita.month,
                         _fechaCita.day, hh, mm);
-                    // RF7+RF8
                     if (app.horarioOcupado(fc, _veterinario!)) {
                       _snack(context, 'Ese horario ya esta ocupado');
                       return;
                     }
-                    app.agregarCita(Cita(
+                    await app.agregarCita(Cita(
                       id: DateTime.now().millisecondsSinceEpoch.toString(),
                       clienteId: app.usuarioActual!.id,
                       mascotaId: _mascotaCitaId!,
@@ -1354,9 +1513,11 @@ class _HomeScreenState extends State<HomeScreen> {
                       veterinario: _veterinario!,
                       servicio: _motivo!,
                     ));
+                    if (!context.mounted) return;
                     _snack(context, 'Cita agendada correctamente');
                     setState(() {
-                      _horaCita = ''; _motivo = null; _mascotaCitaId = null;
+                      _horaCita = ''; _motivo = null;
+                      _mascotaCitaId = null; _veterinario = null;
                     });
                   },
             child: Text('Confirmar Cita',
@@ -1368,6 +1529,99 @@ class _HomeScreenState extends State<HomeScreen> {
                     fontWeight: FontWeight.bold)),
           ),
         ),
+
+        // ── MIS CITAS (RF4 lista con cancelar) ──────────
+        const SizedBox(height: 32),
+        _secTitle('Mis Citas'),
+        const SizedBox(height: 10),
+        app.citas.isEmpty
+            ? _emptyBox(Icons.calendar_today, 'Sin citas registradas',
+                'Agenda tu primera cita con el formulario de arriba')
+            : Column(
+                children: app.citas.map((cita) {
+                  final mNom = app.mascotas
+                      .where((m) => m.id == cita.mascotaId)
+                      .map((m) => m.nombre)
+                      .firstOrNull ?? 'Mascota';
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    decoration: _cardDeco(),
+                    child: ListTile(
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 16, vertical: 8),
+                      leading: Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: kPrimary.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(Icons.event, color: kPrimary, size: 22),
+                      ),
+                      title: Text(cita.servicio,
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 14)),
+                      subtitle: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                        const SizedBox(height: 3),
+                        Text(mNom,
+                            style: TextStyle(
+                                fontSize: 12, color: Colors.grey.shade600)),
+                        Text(cita.veterinario.split(' ').take(2).join(' '),
+                            style: TextStyle(
+                                fontSize: 12, color: Colors.grey.shade600)),
+                        Text(
+                          '${cita.fecha.day}/${cita.fecha.month}/${cita.fecha.year}'
+                          '  ${cita.fecha.hour.toString().padLeft(2, '0')}:'
+                          '${cita.fecha.minute.toString().padLeft(2, '0')}',
+                          style: TextStyle(
+                              fontSize: 11, color: Colors.grey.shade500),
+                        ),
+                      ]),
+                      trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                        // PDF
+                        IconButton(
+                          icon: const Icon(Icons.picture_as_pdf,
+                              color: kAccent, size: 22),
+                          onPressed: () => _generarPDF(cita, app),
+                          tooltip: 'Comprobante',
+                        ),
+                        // Cancelar
+                        IconButton(
+                          icon: const Icon(Icons.cancel_outlined,
+                              color: Colors.red, size: 22),
+                          tooltip: 'Cancelar cita',
+                          onPressed: () async {
+                            final ok = await showDialog<bool>(
+                              context: context,
+                              builder: (_) => AlertDialog(
+                                shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(20)),
+                                title: const Text('Cancelar cita'),
+                                content: Text(
+                                    'Seguro que deseas cancelar la cita de ${cita.servicio}?'),
+                                actions: [
+                                  TextButton(
+                                      onPressed: () =>
+                                          Navigator.pop(context, false),
+                                      child: const Text('No')),
+                                  TextButton(
+                                      onPressed: () =>
+                                          Navigator.pop(context, true),
+                                      child: const Text('Si, cancelar',
+                                          style: TextStyle(
+                                              color: Colors.red))),
+                                ],
+                              ),
+                            );
+                            if (ok == true) await app.cancelarCita(cita.id);
+                          },
+                        ),
+                      ]),
+                    ),
+                  );
+                }).toList(),
+              ),
         const SizedBox(height: 24),
       ]),
     );
@@ -1502,7 +1756,11 @@ class _HomeScreenState extends State<HomeScreen> {
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
           leading: CircleAvatar(
             backgroundColor: const Color(0xFFE3F2FD),
-            backgroundImage: m.foto != null ? FileImage(File(m.foto!)) : null,
+            backgroundImage: m.foto != null
+                ? (m.foto!.startsWith('http')
+                    ? NetworkImage(m.foto!) as ImageProvider
+                    : FileImage(File(m.foto!)))
+                : null,
             child: m.foto == null
                 ? const Icon(Icons.pets, color: kPrimary, size: 22) : null,
           ),
@@ -1752,8 +2010,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     labelText: 'Veterinario',
                     prefixIcon: Icon(Icons.person_outline),
                     border: OutlineInputBorder()),
-                items: _vets.map((x) =>
-                    DropdownMenuItem(value: x, child: Text(x))).toList(),
+                items: app.veterinarios.map((x) =>
+                    DropdownMenuItem(value: x.nombre, child: Text(x.nombre))).toList(),
                 onChanged: (x) => ss(() => v = x),
               ),
             ]),
@@ -1762,13 +2020,14 @@ class _HomeScreenState extends State<HomeScreen> {
             TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
             ElevatedButton(
               style: ElevatedButton.styleFrom(backgroundColor: kPrimary),
-              onPressed: () {
+              onPressed: () async {
                 if (d.text.isEmpty || v == null) return;
-                app.agregarVisita(VisitaMedica(
+                await app.agregarVisita(VisitaMedica(
                   id: DateTime.now().millisecondsSinceEpoch.toString(),
                   mascotaId: mid, fecha: DateTime.now(),
                   diagnostico: d.text, tratamiento: t.text, veterinario: v!,
                 ));
+                if (!ctx.mounted) return;
                 Navigator.pop(ctx);
                 _snack(context, 'Visita registrada');
               },
@@ -1829,13 +2088,14 @@ class _HomeScreenState extends State<HomeScreen> {
             TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancelar')),
             ElevatedButton(
               style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
-              onPressed: () {
+              onPressed: () async {
                 if (n.text.isEmpty) return;
-                app.agregarVacuna(Vacuna(
+                await app.agregarVacuna(Vacuna(
                   id: DateTime.now().millisecondsSinceEpoch.toString(),
                   mascotaId: mid, nombre: n.text,
                   fecha: fApl, proxima: fPrx,
                 ));
+                if (!ctx.mounted) return;
                 Navigator.pop(ctx);
                 _snack(context, 'Vacuna registrada');
               },
@@ -1867,8 +2127,13 @@ class _HomeScreenState extends State<HomeScreen> {
               child: Stack(alignment: Alignment.bottomRight, children: [
                 CircleAvatar(
                   radius: 52, backgroundColor: Colors.grey.shade200,
-                  backgroundImage: _pFoto != null ? FileImage(_pFoto!)
-                      : u?.foto != null ? FileImage(File(u!.foto!)) : null,
+                  backgroundImage: _pFoto != null
+                      ? FileImage(_pFoto!) as ImageProvider
+                      : u?.foto != null
+                          ? (u!.foto!.startsWith('http')
+                              ? NetworkImage(u.foto!) as ImageProvider
+                              : FileImage(File(u.foto!)))
+                          : null,
                   child: (_pFoto == null && u?.foto == null)
                       ? const Icon(Icons.person, size: 50, color: Colors.grey) : null,
                 ),
@@ -2796,6 +3061,704 @@ class _VacunasScreenState extends State<VacunasScreen> {
       ),
     );
   }
+}
+
+// ════════════════════════════════════════════════════════════════
+//  EXPEDIENTE CLINICO  (RF16)
+// ════════════════════════════════════════════════════════════════
+
+class ExpedienteScreen extends StatefulWidget {
+  final AppProvider app;
+  const ExpedienteScreen({super.key, required this.app});
+  @override State<ExpedienteScreen> createState() => _ExpedienteScreenState();
+}
+
+class _ExpedienteScreenState extends State<ExpedienteScreen> {
+  bool _generando = false;
+
+  Future<void> _generarExpedientePDF() async {
+    setState(() => _generando = true);
+    try {
+      final app = widget.app;
+      final u   = app.usuarioActual;
+      final pdf = pw.Document();
+      final ahora = DateTime.now();
+
+      pdf.addPage(
+        pw.MultiPage(
+          pageFormat: PdfPageFormat.a4,
+          margin: const pw.EdgeInsets.all(36),
+          header: (_) => pw.Container(
+            width: double.infinity,
+            padding: const pw.EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            decoration: pw.BoxDecoration(
+              color: const PdfColor.fromInt(0xFF1565C0),
+              borderRadius: const pw.BorderRadius.all(pw.Radius.circular(8)),
+            ),
+            child: pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+              pw.Text('EXPEDIENTE CLINICO',
+                  style: pw.TextStyle(fontSize: 16,
+                      fontWeight: pw.FontWeight.bold, color: PdfColors.white)),
+              pw.Text(
+                  'Generado: ${ahora.day}/${ahora.month}/${ahora.year}',
+                  style: pw.TextStyle(fontSize: 10, color: PdfColors.grey300)),
+            ]),
+          ),
+          footer: (_) => pw.Padding(
+            padding: const pw.EdgeInsets.only(top: 8),
+            child: pw.Row(
+                mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
+                children: [
+              pw.Text('Clinica Veterinaria  |  Tel: 664-123-4567',
+                  style: pw.TextStyle(fontSize: 9, color: PdfColors.grey)),
+              pw.Text('clinica@vet.com',
+                  style: pw.TextStyle(fontSize: 9, color: PdfColors.grey)),
+            ]),
+          ),
+          build: (_) => [
+
+            pw.SizedBox(height: 16),
+
+            // ── DATOS DEL DUEÑO ───────────────────────────
+            _exSec('DATOS DEL CLIENTE'),
+            pw.SizedBox(height: 8),
+            pw.Container(
+              padding: const pw.EdgeInsets.all(12),
+              decoration: pw.BoxDecoration(
+                color: PdfColors.grey100,
+                borderRadius: const pw.BorderRadius.all(pw.Radius.circular(8)),
+              ),
+              child: pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                _exFila('Nombre',    u?.nombre    ?? '-'),
+                _exFila('Correo',    u?.email     ?? '-'),
+                _exFila('Telefono',  u?.telefono  ?? '-'),
+                _exFila('Direccion', u?.direccion ?? '-'),
+                if (u?.fechaNacimiento != null && u!.fechaNacimiento!.isNotEmpty)
+                  _exFila('Fecha de nacimiento', u.fechaNacimiento!),
+                if (u?.genero != null && u!.genero!.isNotEmpty)
+                  _exFila('Genero', u.genero!),
+              ]),
+            ),
+
+            pw.SizedBox(height: 20),
+
+            // ── CITAS AGENDADAS ──────────────────────────
+            _exSec('CITAS AGENDADAS'),
+            pw.SizedBox(height: 8),
+            app.citas.isEmpty
+                ? _exVacio('Sin citas registradas')
+                : pw.Column(children: app.citas.map((c) {
+                    final mNom = app.mascotas
+                        .where((m) => m.id == c.mascotaId)
+                        .map((m) => m.nombre)
+                        .firstOrNull ?? '-';
+                    return pw.Container(
+                      margin: const pw.EdgeInsets.only(bottom: 6),
+                      padding: const pw.EdgeInsets.all(10),
+                      decoration: pw.BoxDecoration(
+                        border: pw.Border.all(color: PdfColors.grey300),
+                        borderRadius:
+                            const pw.BorderRadius.all(pw.Radius.circular(6)),
+                      ),
+                      child: pw.Column(
+                          crossAxisAlignment: pw.CrossAxisAlignment.start,
+                          children: [
+                        pw.Row(
+                            mainAxisAlignment:
+                                pw.MainAxisAlignment.spaceBetween,
+                            children: [
+                          pw.Text(c.servicio,
+                              style: pw.TextStyle(
+                                  fontWeight: pw.FontWeight.bold,
+                                  fontSize: 12)),
+                          pw.Container(
+                            padding: const pw.EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 3),
+                            decoration: pw.BoxDecoration(
+                              color: c.estado == 'Cancelada'
+                                  ? PdfColors.red100
+                                  : PdfColors.green100,
+                              borderRadius: const pw.BorderRadius.all(
+                                  pw.Radius.circular(10)),
+                            ),
+                            child: pw.Text(c.estado,
+                                style: pw.TextStyle(
+                                    fontSize: 9,
+                                    color: c.estado == 'Cancelada'
+                                        ? PdfColors.red800
+                                        : PdfColors.green800)),
+                          ),
+                        ]),
+                        pw.SizedBox(height: 4),
+                        pw.Text(
+                          'Mascota: $mNom  |  Vet: ${c.veterinario}  |  '
+                          '${c.fecha.day}/${c.fecha.month}/${c.fecha.year}  '
+                          '${c.fecha.hour.toString().padLeft(2, '0')}:'
+                          '${c.fecha.minute.toString().padLeft(2, '0')}',
+                          style: pw.TextStyle(
+                              fontSize: 10, color: PdfColors.grey700),
+                        ),
+                      ]),
+                    );
+                  }).toList()),
+
+            pw.SizedBox(height: 20),
+
+            // ── MASCOTAS CON HISTORIAL Y VACUNAS ─────────
+            ...app.mascotas.map((m) {
+              final visitas = app.visitasDe(m.id);
+              final vacunas = app.vacunasDe(m.id);
+
+              return pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                _exSec('MASCOTA: ${m.nombre.toUpperCase()}'),
+                pw.SizedBox(height: 8),
+
+                // datos mascota
+                pw.Container(
+                  padding: const pw.EdgeInsets.all(12),
+                  decoration: pw.BoxDecoration(
+                    color: PdfColors.blue50,
+                    borderRadius:
+                        const pw.BorderRadius.all(pw.Radius.circular(8)),
+                  ),
+                  child: pw.Wrap(spacing: 20, runSpacing: 4, children: [
+                    _exChip('Especie: ${m.especie}'),
+                    _exChip('Raza: ${m.raza}'),
+                    _exChip('Edad: ${m.edad}'),
+                    _exChip('Peso: ${m.peso} kg'),
+                    _exChip('Sexo: ${m.sexo}'),
+                    _exChip('Color: ${m.color}'),
+                    if (m.microchip != null && m.microchip!.isNotEmpty)
+                      _exChip('Microchip: ${m.microchip}'),
+                  ]),
+                ),
+                pw.SizedBox(height: 10),
+
+                // historial medico
+                pw.Text('Historial Medico',
+                    style: pw.TextStyle(
+                        fontSize: 11,
+                        fontWeight: pw.FontWeight.bold,
+                        color: const PdfColor.fromInt(0xFF1565C0))),
+                pw.SizedBox(height: 4),
+                visitas.isEmpty
+                    ? _exVacio('Sin visitas registradas')
+                    : pw.Column(children: visitas.map((v) => pw.Container(
+                          margin: const pw.EdgeInsets.only(bottom: 5),
+                          padding: const pw.EdgeInsets.all(8),
+                          decoration: pw.BoxDecoration(
+                            border: pw.Border.all(color: PdfColors.blue200),
+                            borderRadius: const pw.BorderRadius.all(
+                                pw.Radius.circular(6)),
+                          ),
+                          child: pw.Column(
+                              crossAxisAlignment:
+                                  pw.CrossAxisAlignment.start,
+                              children: [
+                            pw.Row(
+                                mainAxisAlignment:
+                                    pw.MainAxisAlignment.spaceBetween,
+                                children: [
+                              pw.Text(v.diagnostico,
+                                  style: pw.TextStyle(
+                                      fontWeight: pw.FontWeight.bold,
+                                      fontSize: 11)),
+                              pw.Text(
+                                  '${v.fecha.day}/${v.fecha.month}/${v.fecha.year}',
+                                  style: pw.TextStyle(
+                                      fontSize: 9, color: PdfColors.grey)),
+                            ]),
+                            if (v.tratamiento.isNotEmpty)
+                              pw.Text('Tratamiento: ${v.tratamiento}',
+                                  style: pw.TextStyle(
+                                      fontSize: 10,
+                                      color: PdfColors.grey700)),
+                            pw.Text('Veterinario: ${v.veterinario}',
+                                style: pw.TextStyle(
+                                    fontSize: 10, color: PdfColors.grey600)),
+                          ]),
+                        )).toList()),
+
+                pw.SizedBox(height: 10),
+
+                // vacunas
+                pw.Text('Vacunas',
+                    style: pw.TextStyle(
+                        fontSize: 11,
+                        fontWeight: pw.FontWeight.bold,
+                        color: const PdfColor.fromInt(0xFF4A148C))),
+                pw.SizedBox(height: 4),
+                vacunas.isEmpty
+                    ? _exVacio('Sin vacunas registradas')
+                    : pw.Column(children: vacunas.map((v) => pw.Container(
+                          margin: const pw.EdgeInsets.only(bottom: 5),
+                          padding: const pw.EdgeInsets.all(8),
+                          decoration: pw.BoxDecoration(
+                            color: PdfColors.purple50,
+                            borderRadius: const pw.BorderRadius.all(
+                                pw.Radius.circular(6)),
+                          ),
+                          child: pw.Row(
+                              mainAxisAlignment:
+                                  pw.MainAxisAlignment.spaceBetween,
+                              children: [
+                            pw.Text(v.nombre,
+                                style: pw.TextStyle(
+                                    fontWeight: pw.FontWeight.bold,
+                                    fontSize: 11)),
+                            pw.Column(
+                                crossAxisAlignment:
+                                    pw.CrossAxisAlignment.end,
+                                children: [
+                              pw.Text(
+                                  'Aplicada: ${v.fecha.day}/${v.fecha.month}/${v.fecha.year}',
+                                  style: pw.TextStyle(
+                                      fontSize: 9,
+                                      color: PdfColors.grey700)),
+                              if (v.proxima != null)
+                                pw.Text(
+                                    'Proxima: ${v.proxima!.day}/${v.proxima!.month}/${v.proxima!.year}',
+                                    style: pw.TextStyle(
+                                        fontSize: 9,
+                                        color: PdfColors.orange800)),
+                            ]),
+                          ]),
+                        )).toList()),
+
+                pw.SizedBox(height: 20),
+              ]);
+            }),
+          ],
+        ),
+      );
+
+      final dir  = await getApplicationDocumentsDirectory();
+      final path =
+          '${dir.path}/expediente_${u?.nombre.replaceAll(' ', '_') ?? 'cliente'}_${ahora.millisecondsSinceEpoch}.pdf';
+      final file = File(path);
+      await file.writeAsBytes(await pdf.save());
+
+      if (!mounted) return;
+      setState(() => _generando = false);
+
+      await Share.shareXFiles(
+        [XFile(path)],
+        text: 'Expediente Clinico - ${u?.nombre ?? 'Cliente'}',
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _generando = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error al generar expediente: $e')));
+    }
+  }
+
+  // helpers PDF
+  pw.Widget _exSec(String t) => pw.Container(
+        width: double.infinity,
+        padding: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: pw.BoxDecoration(
+          color: const PdfColor.fromInt(0xFF1565C0),
+          borderRadius: const pw.BorderRadius.all(pw.Radius.circular(6)),
+        ),
+        child: pw.Text(t,
+            style: pw.TextStyle(
+                fontSize: 11,
+                fontWeight: pw.FontWeight.bold,
+                color: PdfColors.white)),
+      );
+
+  pw.Widget _exFila(String lbl, String val) => pw.Padding(
+        padding: const pw.EdgeInsets.symmetric(vertical: 2),
+        child: pw.Row(children: [
+          pw.SizedBox(
+            width: 130,
+            child: pw.Text(lbl,
+                style: pw.TextStyle(
+                    fontWeight: pw.FontWeight.bold,
+                    fontSize: 11,
+                    color: PdfColors.grey700)),
+          ),
+          pw.Text(val, style: pw.TextStyle(fontSize: 11)),
+        ]),
+      );
+
+  pw.Widget _exChip(String txt) => pw.Container(
+        padding:
+            const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: pw.BoxDecoration(
+          color: PdfColors.white,
+          borderRadius: const pw.BorderRadius.all(pw.Radius.circular(10)),
+          border: pw.Border.all(color: PdfColors.blue200),
+        ),
+        child: pw.Text(txt,
+            style: pw.TextStyle(fontSize: 9, color: PdfColors.blue900)),
+      );
+
+  pw.Widget _exVacio(String msg) => pw.Padding(
+        padding: const pw.EdgeInsets.symmetric(vertical: 4),
+        child: pw.Text(msg,
+            style: pw.TextStyle(fontSize: 10, color: PdfColors.grey400)),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final app = widget.app;
+    final u   = app.usuarioActual;
+
+    return Scaffold(
+      backgroundColor: kBg,
+      appBar: AppBar(
+        title: const Text('Expediente Clinico'),
+        backgroundColor: kPrimary,
+        foregroundColor: Colors.white,
+        actions: [
+          if (_generando)
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: SizedBox(width: 20, height: 20,
+                  child: CircularProgressIndicator(
+                      color: Colors.white, strokeWidth: 2)),
+            )
+          else
+            IconButton(
+              icon: const Icon(Icons.picture_as_pdf),
+              tooltip: 'Descargar expediente',
+              onPressed: _generarExpedientePDF,
+            ),
+        ],
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+
+          // boton principal
+          SizedBox(
+            width: double.infinity, height: 52,
+            child: ElevatedButton.icon(
+              icon: const Icon(Icons.download, color: Colors.white),
+              label: Text(
+                _generando ? 'Generando PDF...' : 'Descargar Expediente Completo',
+                style: const TextStyle(color: Colors.white,
+                    fontWeight: FontWeight.bold, fontSize: 15),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF1B5E20),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(16)),
+              ),
+              onPressed: _generando ? null : _generarExpedientePDF,
+            ),
+          ),
+
+          const SizedBox(height: 6),
+          Center(
+            child: Text(
+              'El PDF incluye datos del cliente, citas, historial medico y vacunas',
+              style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
+              textAlign: TextAlign.center,
+            ),
+          ),
+
+          const SizedBox(height: 24),
+
+          // DATOS DEL DUEÑO
+          _secCard(
+            title: 'Datos del Cliente',
+            icon: Icons.person_outline,
+            color: kPrimary,
+            child: Column(children: [
+              _infoRow(Icons.person,     u?.nombre     ?? '-'),
+              _infoRow(Icons.email,      u?.email      ?? '-'),
+              _infoRow(Icons.phone,      u?.telefono   ?? '-'),
+              _infoRow(Icons.home,       u?.direccion  ?? '-'),
+              if (u?.fechaNacimiento != null && u!.fechaNacimiento!.isNotEmpty)
+                _infoRow(Icons.cake, u.fechaNacimiento!),
+              if (u?.genero != null && u!.genero!.isNotEmpty)
+                _infoRow(Icons.person_outline, u.genero!),
+            ]),
+          ),
+
+          const SizedBox(height: 16),
+
+          // CITAS
+          _secCard(
+            title: 'Citas Agendadas (${app.citas.length})',
+            icon: Icons.calendar_today,
+            color: Colors.indigo,
+            child: app.citas.isEmpty
+                ? _empty('Sin citas registradas')
+                : Column(
+                    children: app.citas.map((c) {
+                      final mNom = app.mascotas
+                          .where((m) => m.id == c.mascotaId)
+                          .map((m) => m.nombre)
+                          .firstOrNull ?? '-';
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 8),
+                        padding: const EdgeInsets.all(12),
+                        decoration: BoxDecoration(
+                          color: kBg,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(color: Colors.grey.shade200),
+                        ),
+                        child: Row(children: [
+                          Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: Colors.indigo.withOpacity(0.1),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: const Icon(Icons.event,
+                                color: Colors.indigo, size: 18),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                              Text(c.servicio,
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 13)),
+                              Text('$mNom  -  ${c.veterinario.split(' ').take(2).join(' ')}',
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey.shade600)),
+                              Text(
+                                '${c.fecha.day}/${c.fecha.month}/${c.fecha.year}  '
+                                '${c.fecha.hour.toString().padLeft(2, '0')}:'
+                                '${c.fecha.minute.toString().padLeft(2, '0')}',
+                                style: TextStyle(
+                                    fontSize: 11, color: Colors.grey.shade500),
+                              ),
+                            ]),
+                          ),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: c.estado == 'Cancelada'
+                                  ? Colors.red.shade50
+                                  : Colors.green.shade50,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(c.estado,
+                                style: TextStyle(
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.bold,
+                                    color: c.estado == 'Cancelada'
+                                        ? Colors.red.shade700
+                                        : Colors.green.shade700)),
+                          ),
+                        ]),
+                      );
+                    }).toList(),
+                  ),
+          ),
+
+          const SizedBox(height: 16),
+
+          // MASCOTAS CON HISTORIAL Y VACUNAS
+          ...app.mascotas.map((m) {
+            final visitas = app.visitasDe(m.id);
+            final vacunas = app.vacunasDe(m.id);
+            return Column(children: [
+              _secCard(
+                title: m.nombre,
+                icon: Icons.pets,
+                color: Colors.teal,
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                  // datos mascota
+                  Wrap(spacing: 8, runSpacing: 6, children: [
+                    _chip('${m.especie}'),
+                    _chip('${m.raza}'),
+                    _chip('${m.edad}'),
+                    _chip('${m.peso} kg'),
+                    _chip(m.sexo),
+                    if (m.microchip != null && m.microchip!.isNotEmpty)
+                      _chip('Chip: ${m.microchip}'),
+                  ]),
+
+                  const SizedBox(height: 14),
+                  const Divider(),
+
+                  // historial medico
+                  Row(children: [
+                    const Icon(Icons.local_hospital, color: kPrimary, size: 16),
+                    const SizedBox(width: 6),
+                    Text('Historial Medico (${visitas.length})',
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 13)),
+                  ]),
+                  const SizedBox(height: 8),
+                  visitas.isEmpty
+                      ? _empty('Sin visitas registradas')
+                      : Column(
+                          children: visitas.map((v) => Container(
+                            margin: const EdgeInsets.only(bottom: 6),
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFE3F2FD),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Row(children: [
+                              Expanded(
+                                child: Column(
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.start,
+                                    children: [
+                                  Text(v.diagnostico,
+                                      style: const TextStyle(
+                                          fontWeight: FontWeight.bold,
+                                          fontSize: 13)),
+                                  if (v.tratamiento.isNotEmpty)
+                                    Text('Trat: ${v.tratamiento}',
+                                        style: TextStyle(
+                                            fontSize: 11,
+                                            color: Colors.grey.shade600)),
+                                  Text(v.veterinario,
+                                      style: TextStyle(
+                                          fontSize: 11,
+                                          color: Colors.grey.shade500)),
+                                ]),
+                              ),
+                              Text(
+                                  '${v.fecha.day}/${v.fecha.month}/${v.fecha.year}',
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.grey.shade500)),
+                            ]),
+                          )).toList(),
+                        ),
+
+                  const SizedBox(height: 14),
+                  const Divider(),
+
+                  // vacunas
+                  Row(children: [
+                    const Icon(Icons.vaccines,
+                        color: Color(0xFF7B1FA2), size: 16),
+                    const SizedBox(width: 6),
+                    Text('Vacunas (${vacunas.length})',
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 13)),
+                  ]),
+                  const SizedBox(height: 8),
+                  vacunas.isEmpty
+                      ? _empty('Sin vacunas registradas')
+                      : Column(
+                          children: vacunas.map((v) => Container(
+                            margin: const EdgeInsets.only(bottom: 6),
+                            padding: const EdgeInsets.all(10),
+                            decoration: BoxDecoration(
+                              color: const Color(0xFFEDE7F6),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
+                                children: [
+                              Text(v.nombre,
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 13)),
+                              Column(
+                                  crossAxisAlignment: CrossAxisAlignment.end,
+                                  children: [
+                                Text(
+                                    'Aplicada: ${v.fecha.day}/${v.fecha.month}/${v.fecha.year}',
+                                    style: TextStyle(
+                                        fontSize: 10,
+                                        color: Colors.grey.shade600)),
+                                if (v.proxima != null)
+                                  Text(
+                                      'Proxima: ${v.proxima!.day}/${v.proxima!.month}/${v.proxima!.year}',
+                                      style: const TextStyle(
+                                          fontSize: 10,
+                                          color: Colors.orange,
+                                          fontWeight: FontWeight.bold)),
+                              ]),
+                            ]),
+                          )).toList(),
+                        ),
+                ]),
+              ),
+              const SizedBox(height: 16),
+            ]);
+          }),
+
+          const SizedBox(height: 30),
+        ]),
+      ),
+    );
+  }
+
+  Widget _secCard({
+    required String title, required IconData icon,
+    required Color color, required Widget child,
+  }) =>
+      Container(
+        decoration: _cardDeco(),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                    color: color.withOpacity(0.12),
+                    borderRadius: BorderRadius.circular(10)),
+                child: Icon(icon, color: color, size: 20),
+              ),
+              const SizedBox(width: 10),
+              Text(title,
+                  style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15, color: color)),
+            ]),
+            const SizedBox(height: 14),
+            const Divider(height: 1),
+            const SizedBox(height: 12),
+            child,
+          ]),
+        ),
+      );
+
+  Widget _infoRow(IconData icon, String txt) => Padding(
+        padding: const EdgeInsets.only(bottom: 6),
+        child: Row(children: [
+          Icon(icon, size: 16, color: Colors.grey.shade500),
+          const SizedBox(width: 8),
+          Expanded(child: Text(txt,
+              style: const TextStyle(fontSize: 13))),
+        ]),
+      );
+
+  Widget _chip(String txt) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          color: Colors.teal.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: Colors.teal.withOpacity(0.3)),
+        ),
+        child: Text(txt,
+            style: const TextStyle(fontSize: 11, color: Colors.teal)),
+      );
+
+  Widget _empty(String msg) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Text(msg,
+            style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
+      );
 }
 
 // ════════════════════════════════════════════════════════════════
