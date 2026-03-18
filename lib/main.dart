@@ -2943,8 +2943,8 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await Supabase.initialize(
-    url:     'https://knidpuslwnbrcymbirwh.supabase.co',   // ← reemplaza con tu URL
-    anonKey: 'sb_publishable_NWbhMTEqrDCOCCS1xJEnQA_bCUr4bb2',                        // ← reemplaza con tu anon key
+    url:     'https://vgebmmsazwirthdoffuc.supabase.co',
+    anonKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZnZWJtbXNhendpcnRoZG9mZnVjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM1MzE4MzIsImV4cCI6MjA4OTEwNzgzMn0.MX4Lcj4lFhpTITucYYXnLm6BI3nj4L4WK1xmpg8Mvug',
   );
 
   runApp(ChangeNotifierProvider(
