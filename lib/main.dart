@@ -11,6 +11,26 @@ import 'package:share_plus/share_plus.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'dart:async';
 
+// ════════════════════════════════════════════════════════════════
+//  MODELO NOTIFICACION
+// ════════════════════════════════════════════════════════════════
+
+class AppNotificacion {
+  final String id, titulo, cuerpo;
+  final DateTime fecha;
+  bool leida;
+  final String tipo; // 'cita' | 'vacuna'
+
+  AppNotificacion({
+    required this.id,
+    required this.titulo,
+    required this.cuerpo,
+    required this.fecha,
+    required this.tipo,
+    this.leida = false,
+  });
+}
+
 class Veterinario {
   final String id, nombre;
   final String? especialidad, foto;
@@ -204,15 +224,96 @@ class Vacuna {
 // ════════════════════════════════════════════════════════════════
 
 class AppProvider with ChangeNotifier {
-  List<Mascota>      mascotas    = [];
-  List<Cita>         citas       = [];
-  List<VisitaMedica> visitas     = [];
-  List<Vacuna>       vacunas     = [];
-  List<Veterinario>  veterinarios = [];
-  Usuario?           usuarioActual;
-  bool               cargando = false;
+  List<Mascota>          mascotas      = [];
+  List<Cita>             citas         = [];
+  List<VisitaMedica>     visitas       = [];
+  List<Vacuna>           vacunas       = [];
+  List<Veterinario>      veterinarios  = [];
+  List<AppNotificacion>  notificaciones = [];
+  Usuario?               usuarioActual;
+  bool                   cargando = false;
 
   String? get uid => supabase.auth.currentUser?.id;
+
+  int get notificacionesNoLeidas =>
+      notificaciones.where((n) => !n.leida).length;
+
+  // ── Notificaciones ──────────────────────────────
+
+  void generarNotificaciones() {
+    final ahora = DateTime.now();
+    final nuevas = <AppNotificacion>[];
+
+    // Notificaciones de citas próximas (hoy, mañana, en 2 días, en 3 días)
+    for (final cita in citas) {
+      if (cita.estado == 'Cancelada') continue;
+      final diff = cita.fecha.difference(ahora);
+      final dias = diff.inDays;
+      final horas = diff.inHours;
+
+      String? titulo;
+      String? cuerpo;
+
+      if (horas >= 0 && horas <= 2) {
+        titulo = '⏰ ¡Cita en menos de 2 horas!';
+        cuerpo = '${cita.servicio} con ${cita.veterinario.split(' ').take(2).join(' ')} a las '
+            '${cita.fecha.hour.toString().padLeft(2, '0')}:${cita.fecha.minute.toString().padLeft(2, '0')}';
+      } else if (dias == 0) {
+        titulo = '🐾 Tienes una cita hoy';
+        cuerpo = '${cita.servicio} a las ${cita.fecha.hour.toString().padLeft(2, '0')}:${cita.fecha.minute.toString().padLeft(2, '0')} con ${cita.veterinario.split(' ').first}';
+      } else if (dias == 1) {
+        titulo = '📅 Cita mañana';
+        cuerpo = '${cita.servicio} con ${cita.veterinario.split(' ').first} a las ${cita.fecha.hour.toString().padLeft(2, '0')}:${cita.fecha.minute.toString().padLeft(2, '0')}';
+      } else if (dias <= 3) {
+        titulo = '📆 Cita en $dias días';
+        cuerpo = '${cita.servicio} el ${cita.fecha.day}/${cita.fecha.month} con ${cita.veterinario.split(' ').first}';
+      }
+
+      if (titulo != null) {
+        final id = 'cita_${cita.id}';
+        if (!notificaciones.any((n) => n.id == id)) {
+          nuevas.add(AppNotificacion(
+            id: id, titulo: titulo, cuerpo: cuerpo!, fecha: ahora, tipo: 'cita',
+          ));
+        }
+      }
+    }
+
+    // Notificaciones de vacunas próximas
+    for (final vac in vacunas) {
+      if (vac.proxima == null) continue;
+      final dias = vac.proxima!.difference(ahora).inDays;
+      if (dias >= 0 && dias <= 7) {
+        final id = 'vac_${vac.id}';
+        if (!notificaciones.any((n) => n.id == id)) {
+          final mascNom = mascotas.where((m) => m.id == vac.mascotaId)
+              .map((m) => m.nombre).firstOrNull ?? '';
+          nuevas.add(AppNotificacion(
+            id: id,
+            titulo: '💉 Vacuna próxima: ${vac.nombre}',
+            cuerpo: '$mascNom necesita su vacuna en $dias día${dias == 1 ? '' : 's'}',
+            fecha: ahora,
+            tipo: 'vacuna',
+          ));
+        }
+      }
+    }
+
+    if (nuevas.isNotEmpty) {
+      notificaciones.insertAll(0, nuevas);
+      notifyListeners();
+    }
+  }
+
+  void marcarTodasLeidas() {
+    for (final n in notificaciones) { n.leida = true; }
+    notifyListeners();
+  }
+
+  void marcarLeida(String id) {
+    final idx = notificaciones.indexWhere((n) => n.id == id);
+    if (idx != -1) { notificaciones[idx].leida = true; notifyListeners(); }
+  }
 
   // ── Auth ────────────────────────────────────────
 
@@ -227,14 +328,13 @@ class AppProvider with ChangeNotifier {
         data: {'nombre': nombre},
       );
       if (res.user == null) return 'Error al registrar';
-      // actualizar perfil con datos extra
       await supabase.from('profiles').upsert({
         'id': res.user!.id, 'nombre': nombre,
         'telefono': tel, 'direccion': dir,
         'fecha_nacimiento': nac, 'genero': gen,
       });
       await _cargarPerfil(email);
-      return null; // null = exito
+      return null;
     } on AuthException catch (e) {
       return e.message;
     } catch (e) {
@@ -261,6 +361,7 @@ class AppProvider with ChangeNotifier {
     await supabase.auth.signOut();
     usuarioActual = null;
     mascotas = []; citas = []; visitas = []; vacunas = [];
+    notificaciones = [];
     notifyListeners();
   }
 
@@ -275,7 +376,6 @@ class AppProvider with ChangeNotifier {
 
   // ── Carga inicial ────────────────────────────────
 
-  // carga veterinarios publicos (no requiere login)
   Future<void> cargarVeterinarios() async {
     try {
       final rows = await supabase
@@ -296,7 +396,6 @@ class AppProvider with ChangeNotifier {
     if (uid == null) return;
     cargando = true; notifyListeners();
     try {
-      // veterinarios (publicos, no necesitan uid)
       await cargarVeterinarios();
 
       final mRows = await supabase.from('mascotas')
@@ -318,6 +417,9 @@ class AppProvider with ChangeNotifier {
             .select().inFilter('mascota_id', mIds);
         vacunas = (vacRows as List).map((r) => Vacuna.fromJson(r)).toList();
       }
+
+      // Generar notificaciones después de cargar todo
+      generarNotificaciones();
     } catch (e) {
       debugPrint('Error en cargarTodo: $e');
     }
@@ -331,7 +433,6 @@ class AppProvider with ChangeNotifier {
     String? foto, String? tel, String? dir, String? nac, String? gen,
   }) async {
     if (uid == null) return;
-    // subir foto si es ruta local
     String? fotoUrl = foto;
     if (foto != null && !foto.startsWith('http')) {
       fotoUrl = await _subirFoto(foto, 'perfiles');
@@ -372,7 +473,6 @@ class AppProvider with ChangeNotifier {
 
   Future<void> agregarMascota(Mascota m) async {
     if (uid == null) return;
-    // subir foto si es ruta local
     String? fotoUrl;
     if (m.foto != null && !m.foto!.startsWith('http')) {
       fotoUrl = await _subirFoto(m.foto!, 'mascotas');
@@ -387,7 +487,6 @@ class AppProvider with ChangeNotifier {
   Future<void> editarMascota(String id, String nombre, String especie,
       String raza, String edad, String peso, String sexo, String color,
       String? microchip, String? foto) async {
-    // subir foto nueva si es ruta local
     String? fotoUrl = foto;
     if (foto != null && !foto.startsWith('http')) {
       fotoUrl = await _subirFoto(foto, 'mascotas');
@@ -420,23 +519,25 @@ class AppProvider with ChangeNotifier {
   Future<void> agregarCita(Cita c) async {
     if (uid == null) return;
     final data = c.toJson(uid!);
-    // guardar veterinario_id si existe
     final vet = veterinarios.where((v) => v.nombre == c.veterinario).firstOrNull;
     if (vet != null) data['veterinario_id'] = vet.id;
     final row = await supabase.from('citas').insert(data).select().single();
     citas.add(Cita.fromJson(row));
+    // Generar notificaciones al agregar cita
+    generarNotificaciones();
     notifyListeners();
   }
 
   Future<void> cancelarCita(String id) async {
     await supabase.from('citas').delete().eq('id', id);
     citas.removeWhere((c) => c.id == id);
+    // Limpiar notificaciones de esa cita
+    notificaciones.removeWhere((n) => n.id == 'cita_$id');
     notifyListeners();
   }
 
   List<Cita> citasDeUsuario(String _) => citas;
 
-  // RF7+RF8: verifica en BD si el horario ya esta ocupado
   bool horarioOcupado(DateTime fecha, String vetNombre) {
     return citas.any((c) =>
         c.fecha == fecha &&
@@ -444,14 +545,12 @@ class AppProvider with ChangeNotifier {
         c.estado != 'Cancelada');
   }
 
-  // verifica disponibilidad del veterinario en esa fecha (dia de semana)
   bool vetDisponible(String vetNombre, DateTime fecha) {
     final vet = veterinarios.where((v) => v.nombre == vetNombre).firstOrNull;
-    if (vet == null) return true; // si no hay datos, asume disponible
-    // dia 1=Lunes ... 7=Domingo en DateTime, pero en nuestra tabla 1=Lunes...6=Sabado
-    final diaSemana = fecha.weekday; // 1=Mon ... 7=Sun
-    if (diaSemana == 7) return false; // domingo no hay servicio
-    return true; // los horarios los filtramos visualmente
+    if (vet == null) return true;
+    final diaSemana = fecha.weekday;
+    if (diaSemana == 7) return false;
+    return true;
   }
 
   // ── Historial medico ─────────────────────────────
@@ -478,6 +577,7 @@ class AppProvider with ChangeNotifier {
       'proxima': v.proxima?.toIso8601String().split('T')[0],
     }).select().single();
     vacunas.add(Vacuna.fromJson(row));
+    generarNotificaciones();
     notifyListeners();
   }
 
@@ -486,7 +586,7 @@ class AppProvider with ChangeNotifier {
 }
 
 // ════════════════════════════════════════════════════════════════
-//  SPLASH  (verifica sesion activa al abrir)
+//  SPLASH
 // ════════════════════════════════════════════════════════════════
 
 class SplashScreen extends StatefulWidget {
@@ -505,10 +605,7 @@ class _SplashScreenState extends State<SplashScreen> {
     await Future.delayed(const Duration(milliseconds: 300));
     if (!mounted) return;
     final app = Provider.of<AppProvider>(context, listen: false);
-
-    // siempre cargar veterinarios (son datos publicos)
     await app.cargarVeterinarios();
-
     final session = supabase.auth.currentSession;
     if (session != null) {
       await app._cargarPerfil(session.user.email ?? '');
@@ -703,6 +800,143 @@ class _RegisterScreenState extends State<RegisterScreen> {
 }
 
 // ════════════════════════════════════════════════════════════════
+//  PANTALLA DE NOTIFICACIONES
+// ════════════════════════════════════════════════════════════════
+
+class NotificacionesScreen extends StatelessWidget {
+  const NotificacionesScreen({Key? key}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    final app = Provider.of<AppProvider>(context);
+    return Scaffold(
+      backgroundColor: kBg,
+      appBar: AppBar(
+        title: const Text('Notificaciones'),
+        backgroundColor: kPrimary,
+        foregroundColor: Colors.white,
+        actions: [
+          if (app.notificaciones.isNotEmpty)
+            TextButton(
+              onPressed: app.marcarTodasLeidas,
+              child: const Text('Marcar todas',
+                  style: TextStyle(color: Colors.white70, fontSize: 12)),
+            ),
+        ],
+      ),
+      body: app.notificaciones.isEmpty
+          ? Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(
+                        color: kPrimary.withOpacity(0.08),
+                        shape: BoxShape.circle),
+                    child: const Icon(Icons.notifications_none,
+                        color: kPrimary, size: 48),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text('Sin notificaciones',
+                      style: TextStyle(fontSize: 16,
+                          fontWeight: FontWeight.bold, color: Colors.black54)),
+                  const SizedBox(height: 6),
+                  Text('Aquí aparecerán recordatorios de citas y vacunas',
+                      style: TextStyle(fontSize: 13, color: Colors.grey.shade500),
+                      textAlign: TextAlign.center),
+                ],
+              ),
+            )
+          : ListView.builder(
+              padding: const EdgeInsets.all(16),
+              itemCount: app.notificaciones.length,
+              itemBuilder: (_, i) {
+                final n = app.notificaciones[i];
+                final esCita = n.tipo == 'cita';
+                return GestureDetector(
+                  onTap: () => app.marcarLeida(n.id),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 300),
+                    margin: const EdgeInsets.only(bottom: 10),
+                    decoration: BoxDecoration(
+                      color: n.leida ? Colors.white : const Color(0xFFE3F2FD),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: n.leida
+                            ? Colors.grey.shade200
+                            : kPrimary.withOpacity(0.3),
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                            color: Colors.black.withOpacity(0.05),
+                            blurRadius: 8, offset: const Offset(0, 3))
+                      ],
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(14),
+                      child: Row(children: [
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: esCita
+                                ? kPrimary.withOpacity(0.12)
+                                : const Color(0xFFEDE7F6),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Icon(
+                            esCita ? Icons.event : Icons.vaccines,
+                            color: esCita ? kPrimary : const Color(0xFF7B1FA2),
+                            size: 22,
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                            Row(children: [
+                              Expanded(
+                                child: Text(n.titulo,
+                                    style: TextStyle(
+                                        fontWeight: n.leida
+                                            ? FontWeight.w500
+                                            : FontWeight.bold,
+                                        fontSize: 13,
+                                        color: Colors.black87)),
+                              ),
+                              if (!n.leida)
+                                Container(
+                                  width: 8, height: 8,
+                                  decoration: const BoxDecoration(
+                                      color: kPrimary, shape: BoxShape.circle),
+                                ),
+                            ]),
+                            const SizedBox(height: 3),
+                            Text(n.cuerpo,
+                                style: TextStyle(
+                                    fontSize: 12, color: Colors.grey.shade600)),
+                            const SizedBox(height: 4),
+                            Text(
+                              '${n.fecha.day}/${n.fecha.month}/${n.fecha.year}  '
+                              '${n.fecha.hour.toString().padLeft(2, '0')}:'
+                              '${n.fecha.minute.toString().padLeft(2, '0')}',
+                              style: TextStyle(
+                                  fontSize: 10, color: Colors.grey.shade400),
+                            ),
+                          ]),
+                        ),
+                      ]),
+                    ),
+                  ),
+                );
+              },
+            ),
+    );
+  }
+}
+
+// ════════════════════════════════════════════════════════════════
 //  HOME  (navegacion principal)
 // ════════════════════════════════════════════════════════════════
 
@@ -730,15 +964,6 @@ class _HomeScreenState extends State<HomeScreen> {
   String _mSex = 'Macho';
   File?  _mFoto;
 
-  // -- perfil --
-  final _pNom = TextEditingController();
-  final _pEma = TextEditingController();
-  final _pTel = TextEditingController();
-  final _pDir = TextEditingController();
-  final _pNac = TextEditingController();
-  final _pGen = TextEditingController();
-  File?  _pFoto;
-
   // -- tips --
   int _tipIdx = 0;
   final _picker = ImagePicker();
@@ -751,7 +976,6 @@ class _HomeScreenState extends State<HomeScreen> {
     'Consulta General','Vacunacion','Desparasitacion',
     'Cirugia','Emergencia','Bano y Grooming',
   ];
-  // veterinarios ya no son fijos — vienen de app.veterinarios (Supabase)
   static const _especies = ['Perro','Gato','Conejo','Ave','Reptil','Otro'];
   static const _sexos    = ['Macho','Hembra'];
   static const _tips = [
@@ -770,23 +994,8 @@ class _HomeScreenState extends State<HomeScreen> {
   ];
 
   @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final u = Provider.of<AppProvider>(context).usuarioActual;
-    if (u != null) {
-      _pNom.text = u.nombre;
-      _pEma.text = u.email;
-      _pTel.text = u.telefono   ?? '';
-      _pDir.text = u.direccion  ?? '';
-      _pNac.text = u.fechaNacimiento ?? '';
-      _pGen.text = u.genero     ?? '';
-    }
-  }
-
-  @override
   void dispose() {
-    for (final c in [_mNom,_mRaz,_mEda,_mPes,_mCol,_mMic,
-                     _pNom,_pEma,_pTel,_pDir,_pNac,_pGen]) { c.dispose(); }
+    for (final c in [_mNom,_mRaz,_mEda,_mPes,_mCol,_mMic]) { c.dispose(); }
     super.dispose();
   }
 
@@ -794,34 +1003,95 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
     final app = Provider.of<AppProvider>(context);
-    final nombre = app.usuarioActual?.nombre.split(' ').first ?? '';
+    final u = app.usuarioActual;
     final h = DateTime.now().hour;
-    final saludo = h < 12 ? 'Buenos dias' : h < 18 ? 'Buenas tardes' : 'Buenas noches';
+    final saludo = h < 12 ? 'Buenos días' : h < 18 ? 'Buenas tardes' : 'Buenas noches';
+    final noLeidas = app.notificacionesNoLeidas;
 
     return Scaffold(
       backgroundColor: kBg,
       appBar: AppBar(
-        backgroundColor: kPrimary, elevation: 0,
-        title: Text('$saludo, $nombre',
-            style: const TextStyle(fontSize: 15, color: Colors.white)),
+        backgroundColor: kPrimary,
+        elevation: 0,
+        automaticallyImplyLeading: false,
+        title: Row(
+          children: [
+            // Avatar / foto de perfil — abre el perfil
+            GestureDetector(
+              onTap: () => Navigator.push(context,
+                  MaterialPageRoute(builder: (_) => PerfilScreen(app: app))),
+              child: Row(children: [
+                // Avatar
+                Container(
+                  width: 38, height: 38,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.white, width: 2),
+                    color: Colors.white.withOpacity(0.2),
+                    image: u?.foto != null
+                        ? DecorationImage(
+                            image: u!.foto!.startsWith('http')
+                                ? NetworkImage(u.foto!) as ImageProvider
+                                : FileImage(File(u.foto!)),
+                            fit: BoxFit.cover)
+                        : null,
+                  ),
+                  child: u?.foto == null
+                      ? const Icon(Icons.person, color: Colors.white, size: 20)
+                      : null,
+                ),
+                const SizedBox(width: 10),
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text(saludo,
+                      style: const TextStyle(
+                          fontSize: 10, color: Colors.white70,
+                          fontWeight: FontWeight.normal)),
+                  Text(
+                    u?.nombre.split(' ').first ?? 'Usuario',
+                    style: const TextStyle(
+                        fontSize: 14, color: Colors.white,
+                        fontWeight: FontWeight.bold),
+                  ),
+                ]),
+              ]),
+            ),
+          ],
+        ),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.logout, color: Colors.white),
-            onPressed: () async {
-              final app = Provider.of<AppProvider>(context, listen: false);
-              await app.logout();
-              if (!context.mounted) return;
-              Navigator.pushAndRemoveUntil(context,
-                  MaterialPageRoute(builder: (_) => const LoginScreen()), (_) => false);
-            },
+          // Botón notificaciones con badge
+          Stack(
+            children: [
+              IconButton(
+                icon: const Icon(Icons.notifications_outlined, color: Colors.white, size: 26),
+                onPressed: () => Navigator.push(context,
+                    MaterialPageRoute(builder: (_) => const NotificacionesScreen())),
+              ),
+              if (noLeidas > 0)
+                Positioned(
+                  right: 8, top: 8,
+                  child: Container(
+                    padding: const EdgeInsets.all(3),
+                    decoration: const BoxDecoration(
+                        color: Colors.red, shape: BoxShape.circle),
+                    constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                    child: Text(
+                      noLeidas > 9 ? '9+' : '$noLeidas',
+                      style: const TextStyle(
+                          color: Colors.white, fontSize: 9,
+                          fontWeight: FontWeight.bold),
+                      textAlign: TextAlign.center,
+                    ),
+                  ),
+                ),
+            ],
           ),
+          const SizedBox(width: 4),
         ],
       ),
       body: IndexedStack(index: _tab, children: [
         _tabInicio(app),
         _tabCitas(app),
         _tabMascotas(app),
-        _tabPerfil(app),
       ]),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
       floatingActionButton: FloatingActionButton(
@@ -840,7 +1110,17 @@ class _HomeScreenState extends State<HomeScreen> {
             _nav(Icons.calendar_month, 'Citas',    1),
             const SizedBox(width: 48),
             _nav(Icons.pets_rounded,   'Mascotas', 2),
-            _nav(Icons.person_rounded, 'Perfil',   3),
+            // Tab expediente
+            GestureDetector(
+              onTap: () => Navigator.push(context,
+                  MaterialPageRoute(builder: (_) => ExpedienteScreen(app: app))),
+              child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
+                Icon(Icons.folder_shared_outlined, color: Colors.grey.shade400, size: 24),
+                const SizedBox(height: 2),
+                Text('Expediente',
+                    style: TextStyle(fontSize: 10, color: Colors.grey.shade400)),
+              ]),
+            ),
           ]),
         ),
       ),
@@ -878,33 +1158,19 @@ class _HomeScreenState extends State<HomeScreen> {
 
     return SingleChildScrollView(
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        // HEADER
+        // HEADER stats
         Container(
           width: double.infinity,
-          padding: const EdgeInsets.fromLTRB(20, 22, 20, 28),
+          padding: const EdgeInsets.fromLTRB(20, 18, 20, 24),
           decoration: const BoxDecoration(
             color: kPrimary,
             borderRadius: BorderRadius.only(
               bottomLeft: Radius.circular(30), bottomRight: Radius.circular(30)),
           ),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                const Text('Clinica Veterinaria',
-                    style: TextStyle(color: Colors.white70, fontSize: 12)),
-                const SizedBox(height: 2),
-                Text(app.usuarioActual?.nombre ?? '',
-                    style: const TextStyle(color: Colors.white, fontSize: 20,
-                        fontWeight: FontWeight.bold)),
-              ]),
-              Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                    color: Colors.white.withOpacity(0.18), shape: BoxShape.circle),
-                child: const Icon(Icons.local_hospital, color: Colors.white, size: 26),
-              ),
-            ]),
-            const SizedBox(height: 20),
+            const Text('Clínica Veterinaria',
+                style: TextStyle(color: Colors.white70, fontSize: 12)),
+            const SizedBox(height: 14),
             Row(children: [
               _stat(Icons.calendar_today, '${todas.length}',       'Citas'),
               const SizedBox(width: 10),
@@ -919,12 +1185,11 @@ class _HomeScreenState extends State<HomeScreen> {
           padding: const EdgeInsets.fromLTRB(16, 20, 16, 24),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
 
-            // proxima cita
-            _secTitle('Proxima Cita'),
+            _secTitle('Próxima Cita'),
             const SizedBox(height: 10),
             proxima == null
-                ? _emptyBox(Icons.event_available, 'Sin citas proximas',
-                    'Agenda una cita desde la pestana Citas')
+                ? _emptyBox(Icons.event_available, 'Sin citas próximas',
+                    'Agenda una cita desde la pestaña Citas')
                 : _proxCard(app, proxima),
 
             if (todas.length > 1) ...[
@@ -946,7 +1211,7 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(height: 10),
             app.mascotas.isEmpty
                 ? _emptyBox(Icons.pets, 'Sin mascotas',
-                    'Agrega tu primera mascota en la pestana Mascotas')
+                    'Agrega tu primera mascota en la pestaña Mascotas')
                 : SizedBox(
                     height: 92,
                     child: ListView.builder(
@@ -988,7 +1253,6 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
 
-            // recordatorio vacunas
             if (vacProx.isNotEmpty) ...[
               const SizedBox(height: 24),
               _secTitle('Recordatorio de Vacunas'),
@@ -1042,9 +1306,8 @@ class _HomeScreenState extends State<HomeScreen> {
               }),
             ],
 
-            // consejo del dia
             const SizedBox(height: 24),
-            _secTitle('Consejo del dia'),
+            _secTitle('Consejo del día'),
             const SizedBox(height: 10),
             GestureDetector(
               onTap: () => setState(() => _tipIdx++),
@@ -1078,7 +1341,6 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
 
-            // acceso rapido a vacunas
             const SizedBox(height: 24),
             GestureDetector(
               onTap: () => Navigator.push(context,
@@ -1117,7 +1379,6 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
 
-            // acceso rapido a expediente RF16
             const SizedBox(height: 16),
             GestureDetector(
               onTap: () => Navigator.push(context,
@@ -1145,7 +1406,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   const SizedBox(width: 14),
                   const Expanded(child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text('Expediente Clinico',
+                    Text('Expediente Clínico',
                         style: TextStyle(color: Colors.white,
                             fontWeight: FontWeight.bold, fontSize: 15)),
                     SizedBox(height: 2),
@@ -1174,9 +1435,8 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             ),
 
-            // contacto
             const SizedBox(height: 24),
-            _secTitle('Contactar Clinica'),
+            _secTitle('Contactar Clínica'),
             const SizedBox(height: 10),
             _contactCard(),
             const SizedBox(height: 30),
@@ -1284,15 +1544,14 @@ class _HomeScreenState extends State<HomeScreen> {
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(20)),
                   title: const Text('Cancelar cita'),
-                  content: const Text(
-                      'Seguro que deseas cancelar esta cita?'),
+                  content: const Text('¿Seguro que deseas cancelar esta cita?'),
                   actions: [
                     TextButton(
                         onPressed: () => Navigator.pop(context, false),
                         child: const Text('No')),
                     TextButton(
                         onPressed: () => Navigator.pop(context, true),
-                        child: const Text('Si, cancelar',
+                        child: const Text('Sí, cancelar',
                             style: TextStyle(color: Colors.red))),
                   ],
                 ),
@@ -1382,7 +1641,6 @@ class _HomeScreenState extends State<HomeScreen> {
           onChanged: (v) => setState(() => _motivo = v),
         ),
         const SizedBox(height: 12),
-        // dropdown veterinario desde BD
         app.veterinarios.isEmpty
             ? Container(
                 padding: const EdgeInsets.all(14),
@@ -1443,7 +1701,6 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         const SizedBox(height: 20),
 
-        // RF6 horarios
         _secTitle('Horario disponible'),
         const SizedBox(height: 10),
         if (_veterinario == null)
@@ -1507,7 +1764,6 @@ class _HomeScreenState extends State<HomeScreen> {
         ]),
         const SizedBox(height: 24),
 
-        // Boton confirmar
         SizedBox(
           width: double.infinity, height: 52,
           child: ElevatedButton(
@@ -1529,7 +1785,7 @@ class _HomeScreenState extends State<HomeScreen> {
                     final fc = DateTime(_fechaCita.year, _fechaCita.month,
                         _fechaCita.day, hh, mm);
                     if (app.horarioOcupado(fc, _veterinario!)) {
-                      _snack(context, 'Ese horario ya esta ocupado');
+                      _snack(context, 'Ese horario ya está ocupado');
                       return;
                     }
                     await app.agregarCita(Cita(
@@ -1557,7 +1813,6 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
 
-        // ── MIS CITAS (RF4 lista con cancelar) ──────────
         const SizedBox(height: 32),
         _secTitle('Mis Citas'),
         const SizedBox(height: 10),
@@ -1606,14 +1861,12 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ]),
                       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                        // PDF
                         IconButton(
                           icon: const Icon(Icons.picture_as_pdf,
                               color: kAccent, size: 22),
                           onPressed: () => _generarPDF(cita, app),
                           tooltip: 'Comprobante',
                         ),
-                        // Cancelar
                         IconButton(
                           icon: const Icon(Icons.cancel_outlined,
                               color: Colors.red, size: 22),
@@ -1626,7 +1879,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     borderRadius: BorderRadius.circular(20)),
                                 title: const Text('Cancelar cita'),
                                 content: Text(
-                                    'Seguro que deseas cancelar la cita de ${cita.servicio}?'),
+                                    '¿Seguro que deseas cancelar la cita de ${cita.servicio}?'),
                                 actions: [
                                   TextButton(
                                       onPressed: () =>
@@ -1635,7 +1888,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                   TextButton(
                                       onPressed: () =>
                                           Navigator.pop(context, true),
-                                      child: const Text('Si, cancelar',
+                                      child: const Text('Sí, cancelar',
                                           style: TextStyle(
                                               color: Colors.red))),
                                 ],
@@ -1666,7 +1919,6 @@ class _HomeScreenState extends State<HomeScreen> {
             _secTitle('Registrar Mascota'),
             const SizedBox(height: 16),
 
-            // foto mascota
             Center(
               child: GestureDetector(
                 onTap: () async {
@@ -1700,7 +1952,6 @@ class _HomeScreenState extends State<HomeScreen> {
             _tf(_mNom, 'Nombre *',  Icons.pets),
             const SizedBox(height: 10),
 
-            // especie y sexo en fila
             Row(children: [
               Expanded(child: _dropInline<String>(
                 value: _mEsp, label: 'Especie',
@@ -1810,8 +2061,6 @@ class _HomeScreenState extends State<HomeScreen> {
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
               child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 const Divider(),
-
-                // detalles mascota
                 Wrap(spacing: 10, runSpacing: 6, children: [
                   _chipInfo('Edad: ${m.edad}'),
                   _chipInfo('Peso: ${m.peso} kg'),
@@ -1822,9 +2071,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(height: 12),
                 const Divider(),
 
-                // RF11 Historial medico
                 Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                  Text('Historial Medico',
+                  Text('Historial Médico',
                       style: TextStyle(fontWeight: FontWeight.bold,
                           color: Colors.grey.shade700, fontSize: 13)),
                   TextButton(
@@ -1862,7 +2110,6 @@ class _HomeScreenState extends State<HomeScreen> {
                 const SizedBox(height: 10),
                 const Divider(),
 
-                // RF12 Vacunas
                 Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
                   Text('Vacunas',
                       style: TextStyle(fontWeight: FontWeight.bold,
@@ -1890,7 +2137,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                   fontWeight: FontWeight.bold, fontSize: 13)),
                           Text(
                             'Aplicada: ${v.fecha.day}/${v.fecha.month}/${v.fecha.year}'
-                            '${v.proxima != null ? '   Proxima: ${v.proxima!.day}/${v.proxima!.month}/${v.proxima!.year}' : ''}',
+                            '${v.proxima != null ? '   Próxima: ${v.proxima!.day}/${v.proxima!.month}/${v.proxima!.year}' : ''}',
                             style: TextStyle(
                                 fontSize: 11, color: Colors.grey.shade600),
                           ),
@@ -1914,7 +2161,7 @@ class _HomeScreenState extends State<HomeScreen> {
         child: Text(txt, style: const TextStyle(fontSize: 11, color: kPrimary)),
       );
 
-  // ═════ Dialogos mascotas ═════════════════════════
+  // ═════ Diálogos mascotas ═════════════════════════
 
   void _dlgEditarMascota(AppProvider app, Mascota m) {
     final nc = TextEditingController(text: m.nombre);
@@ -1934,7 +2181,6 @@ class _HomeScreenState extends State<HomeScreen> {
           title: Text('Editar ${m.nombre}'),
           content: SingleChildScrollView(
             child: Column(mainAxisSize: MainAxisSize.min, children: [
-              // foto
               GestureDetector(
                 onTap: () async {
                   final f = await _picker.pickImage(source: ImageSource.gallery);
@@ -2003,7 +2249,7 @@ class _HomeScreenState extends State<HomeScreen> {
       builder: (_) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
         title: const Text('Eliminar mascota'),
-        content: Text('Seguro que deseas eliminar a ${m.nombre}?'),
+        content: Text('¿Seguro que deseas eliminar a ${m.nombre}?'),
         actions: [
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancelar')),
           TextButton(
@@ -2024,10 +2270,10 @@ class _HomeScreenState extends State<HomeScreen> {
       builder: (_) => StatefulBuilder(
         builder: (ctx, ss) => AlertDialog(
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          title: const Text('Nueva Visita Medica'),
+          title: const Text('Nueva Visita Médica'),
           content: SingleChildScrollView(
             child: Column(mainAxisSize: MainAxisSize.min, children: [
-              _tf(d, 'Diagnostico', Icons.medical_information_outlined),
+              _tf(d, 'Diagnóstico', Icons.medical_information_outlined),
               const SizedBox(height: 10),
               _tf(t, 'Tratamiento', Icons.medication_outlined),
               const SizedBox(height: 10),
@@ -2084,7 +2330,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.calendar_today, color: kPrimary),
                 title: Text(
-                  'Fecha de aplicacion: ${fApl.day}/${fApl.month}/${fApl.year}',
+                  'Fecha de aplicación: ${fApl.day}/${fApl.month}/${fApl.year}',
                   style: const TextStyle(fontSize: 13),
                 ),
                 onTap: () async {
@@ -2098,8 +2344,8 @@ class _HomeScreenState extends State<HomeScreen> {
                 contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.event_repeat, color: Colors.teal),
                 title: Text(
-                  fPrx == null ? 'Proxima dosis (opcional)'
-                      : 'Proxima: ${fPrx!.day}/${fPrx!.month}/${fPrx!.year}',
+                  fPrx == null ? 'Próxima dosis (opcional)'
+                      : 'Próxima: ${fPrx!.day}/${fPrx!.month}/${fPrx!.year}',
                   style: const TextStyle(fontSize: 13),
                 ),
                 onTap: () async {
@@ -2134,126 +2380,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // ════════════════ TAB PERFIL ══════════════════════
-
-  Widget _tabPerfil(AppProvider app) {
-    final u = app.usuarioActual;
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(children: [
-        // Foto + nombre
-        Container(
-          width: double.infinity, padding: const EdgeInsets.all(24),
-          decoration: _cardDeco(),
-          child: Column(children: [
-            GestureDetector(
-              onTap: () async {
-                final f = await _picker.pickImage(source: ImageSource.gallery);
-                if (f != null) setState(() => _pFoto = File(f.path));
-              },
-              child: Stack(alignment: Alignment.bottomRight, children: [
-                CircleAvatar(
-                  radius: 52, backgroundColor: Colors.grey.shade200,
-                  backgroundImage: _pFoto != null
-                      ? FileImage(_pFoto!) as ImageProvider
-                      : u?.foto != null
-                          ? (u!.foto!.startsWith('http')
-                              ? NetworkImage(u.foto!) as ImageProvider
-                              : FileImage(File(u.foto!)))
-                          : null,
-                  child: (_pFoto == null && u?.foto == null)
-                      ? const Icon(Icons.person, size: 50, color: Colors.grey) : null,
-                ),
-                Container(
-                  padding: const EdgeInsets.all(6),
-                  decoration: const BoxDecoration(color: kPrimary, shape: BoxShape.circle),
-                  child: const Icon(Icons.camera_alt, size: 14, color: Colors.white),
-                ),
-              ]),
-            ),
-            const SizedBox(height: 12),
-            Text(u?.nombre ?? 'Usuario',
-                style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-            const SizedBox(height: 4),
-            Text(u?.email ?? '',
-                style: TextStyle(color: Colors.grey.shade600, fontSize: 13)),
-          ]),
-        ),
-
-        const SizedBox(height: 20),
-
-        // Formulario completo RF2
-        Container(
-          padding: const EdgeInsets.all(20), decoration: _cardDeco(),
-          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            _secTitle('Informacion Personal'),
-            const SizedBox(height: 16),
-            _tf(_pNom, 'Nombre completo',        Icons.person_outline),
-            const SizedBox(height: 10),
-            _tf(_pEma, 'Correo electronico',     Icons.email_outlined),
-            const SizedBox(height: 10),
-            _tf(_pTel, 'Telefono',               Icons.phone_outlined),
-            const SizedBox(height: 10),
-            _tf(_pDir, 'Direccion',              Icons.home_outlined),
-            const SizedBox(height: 10),
-            _tf(_pNac, 'Fecha de nacimiento',    Icons.cake_outlined),
-            const SizedBox(height: 10),
-            _tf(_pGen, 'Genero',                 Icons.person_outline),
-            const SizedBox(height: 20),
-            SizedBox(
-              width: double.infinity, height: 50,
-              child: ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                    backgroundColor: kPrimary,
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14))),
-                onPressed: () {
-                  if (_pNom.text.isEmpty || _pEma.text.isEmpty) {
-                    _snack(context, 'Nombre y correo son obligatorios');
-                    return;
-                  }
-                  app.actualizarPerfil(
-                    nombre: _pNom.text, email: _pEma.text,
-                    foto: _pFoto?.path, tel: _pTel.text, dir: _pDir.text,
-                    nac: _pNac.text, gen: _pGen.text,
-                  );
-                  _snack(context, 'Perfil actualizado');
-                },
-                child: const Text('Guardar cambios',
-                    style: TextStyle(fontSize: 15, color: Colors.white,
-                        fontWeight: FontWeight.bold)),
-              ),
-            ),
-          ]),
-        ),
-
-        const SizedBox(height: 16),
-
-        SizedBox(
-          width: double.infinity, height: 50,
-          child: OutlinedButton(
-            style: OutlinedButton.styleFrom(
-              side: const BorderSide(color: Colors.red),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(14)),
-            ),
-            onPressed: () {
-              app.logout();
-              Navigator.pushAndRemoveUntil(context,
-                  MaterialPageRoute(builder: (_) => const LoginScreen()),
-                  (_) => false);
-            },
-            child: const Text('Cerrar sesion',
-                style: TextStyle(fontSize: 15, color: Colors.red,
-                    fontWeight: FontWeight.bold)),
-          ),
-        ),
-        const SizedBox(height: 30),
-      ]),
-    );
-  }
-
-  // ════════════════ CONTACTO RF13 ══════════════════
+  // ════════════════ CONTACTO ══════════════════
 
   Widget _contactCard() => Container(
         decoration: _cardDeco(),
@@ -2270,9 +2397,9 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
               const SizedBox(width: 14),
               const Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('Clinica Veterinaria',
+                Text('Clínica Veterinaria',
                     style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
-                Text('Lunes a Sabado  9:00 - 17:00',
+                Text('Lunes a Sábado  9:00 - 17:00',
                     style: TextStyle(color: Colors.grey, fontSize: 12)),
               ]),
             ]),
@@ -2281,11 +2408,11 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(height: 16),
             Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
               _cBtn(Icons.phone_outlined,    'Llamar',    Colors.green,
-                  () => _launch('tel:6641234567')),
+                  () => _launch('tel:6648094202')),
               _cBtn(Icons.chat_outlined,     'WhatsApp',  Colors.teal,
-                  () => _launch('https://wa.me/526641234567')),
+                  () => _launch('https://wa.me/6648094202')),
               _cBtn(Icons.email_outlined,    'Email',     kPrimary,
-                  () => _launch('mailto:clinica@vet.com')),
+                  () => _launch('mailto:0324108105@gmail.com')),
               _cBtn(Icons.location_on,       'Mapa',      Colors.orange,
                   () => _launch('https://maps.google.com/?q=Clinica+Veterinaria+Tijuana')),
             ]),
@@ -2317,7 +2444,7 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // ════════════════ PDF RF14 ════════════════════════
+  // ════════════════ PDF ════════════════════════
 
   Future<void> _generarPDF(Cita cita, AppProvider app) async {
     try {
@@ -2335,7 +2462,6 @@ class _HomeScreenState extends State<HomeScreen> {
           build: (_) => pw.Column(
               crossAxisAlignment: pw.CrossAxisAlignment.start,
               children: [
-            // encabezado
             pw.Container(
               width: double.infinity,
               padding: const pw.EdgeInsets.all(16),
@@ -2350,13 +2476,11 @@ class _HomeScreenState extends State<HomeScreen> {
                     style: pw.TextStyle(fontSize: 20,
                         fontWeight: pw.FontWeight.bold, color: PdfColors.white)),
                 pw.SizedBox(height: 4),
-                pw.Text('Clinica Veterinaria  |  Tel: 664-123-4567',
+                pw.Text('Verify Booking.co  |  Tel: 664-809-4202',
                     style: pw.TextStyle(fontSize: 11, color: PdfColors.grey300)),
               ]),
             ),
             pw.SizedBox(height: 24),
-
-            // seccion cita
             _pdfSec('Datos de la Cita'),
             _pdfFila('Servicio',    cita.servicio),
             _pdfFila('Veterinario', cita.veterinario),
@@ -2366,9 +2490,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 '${cita.fecha.hour.toString().padLeft(2, '0')}:'
                 '${cita.fecha.minute.toString().padLeft(2, '0')}'),
             _pdfFila('Estado', cita.estado),
-
             pw.SizedBox(height: 16),
-            // seccion mascota
             _pdfSec('Datos de la Mascota'),
             _pdfFila('Nombre', mNom),
             if (mascota != null) ...[
@@ -2379,19 +2501,16 @@ class _HomeScreenState extends State<HomeScreen> {
               if (mascota.microchip != null)
                 _pdfFila('Microchip', mascota.microchip!),
             ],
-
             pw.SizedBox(height: 16),
-            // seccion dueno
             if (u != null) ...[
-              _pdfSec('Datos del Dueno'),
+              _pdfSec('Datos del Dueño'),
               _pdfFila('Nombre',   u.nombre),
               _pdfFila('Correo',   u.email),
               if (u.telefono != null && u.telefono!.isNotEmpty)
-                _pdfFila('Telefono', u.telefono!),
+                _pdfFila('Teléfono', u.telefono!),
               if (u.direccion != null && u.direccion!.isNotEmpty)
-                _pdfFila('Direccion', u.direccion!),
+                _pdfFila('Dirección', u.direccion!),
             ],
-
             pw.SizedBox(height: 24),
             pw.Divider(),
             pw.SizedBox(height: 8),
@@ -2401,7 +2520,6 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
       );
 
-      // guardar y compartir
       final dir  = await getApplicationDocumentsDirectory();
       final path = '${dir.path}/comprobante_cita_${cita.id.substring(0, 10)}.pdf';
       final file = File(path);
@@ -2409,10 +2527,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
       if (!mounted) return;
       _snack(context, 'Comprobante generado');
-
-      // compartir via share_plus (WhatsApp, email, etc.)
       await Share.shareXFiles([XFile(path)],
-          text: 'Comprobante de cita - Clinica Veterinaria');
+          text: 'Comprobante de cita - Clínica Veterinaria');
     } catch (e) {
       if (!mounted) return;
       _snack(context, 'Error al generar comprobante: $e');
@@ -2493,6 +2609,359 @@ class _HomeScreenState extends State<HomeScreen> {
 }
 
 // ════════════════════════════════════════════════════════════════
+//  PANTALLA DE PERFIL  (ahora pantalla separada)
+// ════════════════════════════════════════════════════════════════
+
+class PerfilScreen extends StatefulWidget {
+  final AppProvider app;
+  const PerfilScreen({Key? key, required this.app}) : super(key: key);
+  @override State<PerfilScreen> createState() => _PerfilScreenState();
+}
+
+class _PerfilScreenState extends State<PerfilScreen> {
+  late final TextEditingController _pNom;
+  late final TextEditingController _pEma;
+  late final TextEditingController _pTel;
+  late final TextEditingController _pDir;
+  late final TextEditingController _pNac;
+  late final TextEditingController _pGen;
+  File? _pFoto;
+  final _picker = ImagePicker();
+
+  @override
+  void initState() {
+    super.initState();
+    final u = widget.app.usuarioActual;
+    _pNom = TextEditingController(text: u?.nombre ?? '');
+    _pEma = TextEditingController(text: u?.email ?? '');
+    _pTel = TextEditingController(text: u?.telefono ?? '');
+    _pDir = TextEditingController(text: u?.direccion ?? '');
+    _pNac = TextEditingController(text: u?.fechaNacimiento ?? '');
+    _pGen = TextEditingController(text: u?.genero ?? '');
+  }
+
+  @override
+  void dispose() {
+    for (final c in [_pNom, _pEma, _pTel, _pDir, _pNac, _pGen]) { c.dispose(); }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final app = widget.app;
+    final u = app.usuarioActual;
+
+    return Scaffold(
+      backgroundColor: kBg,
+      appBar: AppBar(
+        title: const Text('Mi Perfil'),
+        backgroundColor: kPrimary,
+        foregroundColor: Colors.white,
+        actions: [
+          // Botón cerrar sesión en AppBar del perfil
+          TextButton.icon(
+            onPressed: () async {
+              await app.logout();
+              if (!context.mounted) return;
+              Navigator.pushAndRemoveUntil(context,
+                  MaterialPageRoute(builder: (_) => const LoginScreen()),
+                  (_) => false);
+            },
+            icon: const Icon(Icons.logout, color: Colors.white70, size: 18),
+            label: const Text('Salir',
+                style: TextStyle(color: Colors.white70, fontSize: 13)),
+          ),
+        ],
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(children: [
+
+          // ── Foto + nombre ──────────────────────
+          Container(
+            width: double.infinity, padding: const EdgeInsets.all(24),
+            decoration: _cardDeco(),
+            child: Column(children: [
+              GestureDetector(
+                onTap: () async {
+                  final f = await _picker.pickImage(source: ImageSource.gallery);
+                  if (f != null) setState(() => _pFoto = File(f.path));
+                },
+                child: Stack(alignment: Alignment.bottomRight, children: [
+                  CircleAvatar(
+                    radius: 52, backgroundColor: Colors.grey.shade200,
+                    backgroundImage: _pFoto != null
+                        ? FileImage(_pFoto!) as ImageProvider
+                        : u?.foto != null
+                            ? (u!.foto!.startsWith('http')
+                                ? NetworkImage(u.foto!) as ImageProvider
+                                : FileImage(File(u.foto!)))
+                            : null,
+                    child: (_pFoto == null && u?.foto == null)
+                        ? const Icon(Icons.person, size: 50, color: Colors.grey) : null,
+                  ),
+                  Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: const BoxDecoration(color: kPrimary, shape: BoxShape.circle),
+                    child: const Icon(Icons.camera_alt, size: 14, color: Colors.white),
+                  ),
+                ]),
+              ),
+              const SizedBox(height: 12),
+              Text(u?.nombre ?? 'Usuario',
+                  style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              Text(u?.email ?? '',
+                  style: TextStyle(color: Colors.grey.shade600, fontSize: 13)),
+              const SizedBox(height: 8),
+              // Estadísticas rápidas del usuario
+              Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                _statChip(Icons.pets, '${app.mascotas.length}', 'mascotas'),
+                const SizedBox(width: 12),
+                _statChip(Icons.calendar_today, '${app.citas.length}', 'citas'),
+                const SizedBox(width: 12),
+                _statChip(Icons.vaccines, '${app.vacunas.length}', 'vacunas'),
+              ]),
+            ]),
+          ),
+
+          const SizedBox(height: 20),
+
+          // ── Formulario ──────────────────────────
+          Container(
+            padding: const EdgeInsets.all(20), decoration: _cardDeco(),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                      color: kPrimary.withOpacity(0.1),
+                      borderRadius: BorderRadius.circular(10)),
+                  child: const Icon(Icons.person_outline, color: kPrimary, size: 20),
+                ),
+                const SizedBox(width: 10),
+                const Text('Información Personal',
+                    style: TextStyle(fontWeight: FontWeight.bold,
+                        fontSize: 15, color: kPrimary)),
+              ]),
+              const SizedBox(height: 16),
+              _tf(_pNom, 'Nombre completo',        Icons.person_outline),
+              const SizedBox(height: 10),
+              _tf(_pEma, 'Correo electrónico',     Icons.email_outlined),
+              const SizedBox(height: 10),
+              _tf(_pTel, 'Teléfono',               Icons.phone_outlined),
+              const SizedBox(height: 10),
+              _tf(_pDir, 'Dirección',              Icons.home_outlined),
+              const SizedBox(height: 10),
+              _tf(_pNac, 'Fecha de nacimiento',    Icons.cake_outlined),
+              const SizedBox(height: 10),
+              _tf(_pGen, 'Género',                 Icons.person_outline),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity, height: 50,
+                child: ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                      backgroundColor: kPrimary,
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14))),
+                  onPressed: () {
+                    if (_pNom.text.isEmpty || _pEma.text.isEmpty) {
+                      _snack(context, 'Nombre y correo son obligatorios');
+                      return;
+                    }
+                    app.actualizarPerfil(
+                      nombre: _pNom.text, email: _pEma.text,
+                      foto: _pFoto?.path, tel: _pTel.text, dir: _pDir.text,
+                      nac: _pNac.text, gen: _pGen.text,
+                    );
+                    _snack(context, 'Perfil actualizado');
+                    setState(() {}); // actualiza la vista
+                  },
+                  child: const Text('Guardar cambios',
+                      style: TextStyle(fontSize: 15, color: Colors.white,
+                          fontWeight: FontWeight.bold)),
+                ),
+              ),
+            ]),
+          ),
+
+          const SizedBox(height: 16),
+
+          // ── Expediente directo desde perfil ─────
+          GestureDetector(
+            onTap: () => Navigator.push(context,
+                MaterialPageRoute(builder: (_) => ExpedienteScreen(app: app))),
+            child: Container(
+              width: double.infinity, padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  colors: [Color(0xFF1B5E20), Color(0xFF43A047)],
+                  begin: Alignment.topLeft, end: Alignment.bottomRight,
+                ),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Row(children: [
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(12)),
+                  child: const Icon(Icons.folder_shared, color: Colors.white, size: 22),
+                ),
+                const SizedBox(width: 12),
+                const Expanded(child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Text('Expediente Clínico',
+                      style: TextStyle(color: Colors.white,
+                          fontWeight: FontWeight.bold, fontSize: 14)),
+                  SizedBox(height: 2),
+                  Text('Ver historial completo y descargar PDF',
+                      style: TextStyle(color: Colors.white70, fontSize: 12)),
+                ])),
+                const Icon(Icons.arrow_forward_ios, color: Colors.white70, size: 14),
+              ]),
+            ),
+          ),
+
+          const SizedBox(height: 16),
+
+          // ── Sección mascotas (vista rápida) ─────
+          Container(
+            padding: const EdgeInsets.all(20), decoration: _cardDeco(),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                Row(children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                        color: Colors.teal.withOpacity(0.1),
+                        borderRadius: BorderRadius.circular(10)),
+                    child: const Icon(Icons.pets, color: Colors.teal, size: 20),
+                  ),
+                  const SizedBox(width: 10),
+                  const Text('Mis Mascotas',
+                      style: TextStyle(fontWeight: FontWeight.bold,
+                          fontSize: 15, color: Colors.teal)),
+                ]),
+              ]),
+              const SizedBox(height: 14),
+              const Divider(height: 1),
+              const SizedBox(height: 12),
+              app.mascotas.isEmpty
+                  ? Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      child: Text('Sin mascotas registradas',
+                          style: TextStyle(color: Colors.grey.shade400, fontSize: 13)),
+                    )
+                  : Column(
+                      children: app.mascotas.map((m) {
+                        final vacunas = app.vacunasDe(m.id);
+                        final visitas = app.visitasDe(m.id);
+                        return Container(
+                          margin: const EdgeInsets.only(bottom: 10),
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: kBg,
+                            borderRadius: BorderRadius.circular(12),
+                            border: Border.all(color: Colors.grey.shade200),
+                          ),
+                          child: Row(children: [
+                            Container(
+                              width: 48, height: 48,
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFE3F2FD),
+                                shape: BoxShape.circle,
+                                image: m.foto != null
+                                    ? DecorationImage(
+                                        image: m.foto!.startsWith('http')
+                                            ? NetworkImage(m.foto!) as ImageProvider
+                                            : FileImage(File(m.foto!)),
+                                        fit: BoxFit.cover)
+                                    : null,
+                              ),
+                              child: m.foto == null
+                                  ? const Icon(Icons.pets, color: kPrimary, size: 22)
+                                  : null,
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                Text(m.nombre,
+                                    style: const TextStyle(
+                                        fontWeight: FontWeight.bold, fontSize: 14)),
+                                Text('${m.especie} · ${m.raza}',
+                                    style: TextStyle(
+                                        fontSize: 12, color: Colors.grey.shade600)),
+                              ]),
+                            ),
+                            Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                              _miniChip('${vacunas.length} vacunas', const Color(0xFFEDE7F6), const Color(0xFF7B1FA2)),
+                              const SizedBox(height: 4),
+                              _miniChip('${visitas.length} visitas', const Color(0xFFE3F2FD), kPrimary),
+                            ]),
+                          ]),
+                        );
+                      }).toList(),
+                    ),
+            ]),
+          ),
+
+          const SizedBox(height: 16),
+
+          // ── Botón cerrar sesión ──────────────────
+          SizedBox(
+            width: double.infinity, height: 50,
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.logout, color: Colors.red),
+              label: const Text('Cerrar sesión',
+                  style: TextStyle(fontSize: 15, color: Colors.red,
+                      fontWeight: FontWeight.bold)),
+              style: OutlinedButton.styleFrom(
+                side: const BorderSide(color: Colors.red),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14)),
+              ),
+              onPressed: () async {
+                await app.logout();
+                if (!context.mounted) return;
+                Navigator.pushAndRemoveUntil(context,
+                    MaterialPageRoute(builder: (_) => const LoginScreen()),
+                    (_) => false);
+              },
+            ),
+          ),
+          const SizedBox(height: 30),
+        ]),
+      ),
+    );
+  }
+
+  Widget _statChip(IconData icon, String val, String lbl) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        decoration: BoxDecoration(
+            color: kPrimary.withOpacity(0.08),
+            borderRadius: BorderRadius.circular(20)),
+        child: Row(children: [
+          Icon(icon, size: 14, color: kPrimary),
+          const SizedBox(width: 4),
+          Text('$val $lbl',
+              style: const TextStyle(fontSize: 11, color: kPrimary,
+                  fontWeight: FontWeight.w600)),
+        ]),
+      );
+
+  Widget _miniChip(String txt, Color bg, Color color) => Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+            color: bg, borderRadius: BorderRadius.circular(10)),
+        child: Text(txt, style: TextStyle(fontSize: 10, color: color,
+            fontWeight: FontWeight.w600)),
+      );
+}
+
+// ════════════════════════════════════════════════════════════════
 //  SERVICIO TILE
 // ════════════════════════════════════════════════════════════════
 
@@ -2524,7 +2993,7 @@ class _ServTile extends StatelessWidget {
 }
 
 // ════════════════════════════════════════════════════════════════
-//  PANTALLA CAMINATA (RF5 podometro real)
+//  PANTALLA CAMINATA
 // ════════════════════════════════════════════════════════════════
 
 class PasosScreen extends StatefulWidget {
@@ -2628,7 +3097,7 @@ class _PasosScreenState extends State<PasosScreen>
           const Text('pasos',
               style: TextStyle(color: Colors.grey, fontSize: 16)),
           if (_err)
-            const Text('Modo simulacion activo',
+            const Text('Modo simulación activo',
                 style: TextStyle(fontSize: 11, color: Colors.grey)),
           const SizedBox(height: 20),
           _dropLocal<String>(
@@ -2711,7 +3180,7 @@ class _PasosScreenState extends State<PasosScreen>
 }
 
 // ════════════════════════════════════════════════════════════════
-//  PANTALLA DE VACUNAS  (RF12 – lista general + registro)
+//  PANTALLA DE VACUNAS
 // ════════════════════════════════════════════════════════════════
 
 class VacunasScreen extends StatefulWidget {
@@ -2721,7 +3190,6 @@ class VacunasScreen extends StatefulWidget {
 }
 
 class _VacunasScreenState extends State<VacunasScreen> {
-  // filtro
   String? _filtroMascota;
 
   void _dlgAgregarVacuna(BuildContext context) {
@@ -2739,7 +3207,6 @@ class _VacunasScreenState extends State<VacunasScreen> {
           title: const Text('Registrar Vacuna'),
           content: SingleChildScrollView(
             child: Column(mainAxisSize: MainAxisSize.min, children: [
-              // selector mascota
               DropdownButtonFormField<String>(
                 value: mid,
                 decoration: InputDecoration(
@@ -2755,7 +3222,6 @@ class _VacunasScreenState extends State<VacunasScreen> {
               const SizedBox(height: 10),
               _tf(nomCtrl, 'Nombre de la vacuna *', Icons.vaccines_outlined),
               const SizedBox(height: 12),
-              // fecha aplicacion
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.calendar_today, color: kPrimary),
@@ -2770,13 +3236,12 @@ class _VacunasScreenState extends State<VacunasScreen> {
                   if (d != null) ss(() => fApl = d);
                 },
               ),
-              // proxima dosis
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.event_repeat, color: Colors.teal),
                 title: Text(
-                  fPrx == null ? 'Proxima dosis (opcional)'
-                      : 'Proxima: ${fPrx!.day}/${fPrx!.month}/${fPrx!.year}',
+                  fPrx == null ? 'Próxima dosis (opcional)'
+                      : 'Próxima: ${fPrx!.day}/${fPrx!.month}/${fPrx!.year}',
                   style: const TextStyle(fontSize: 13),
                 ),
                 onTap: () async {
@@ -2806,7 +3271,7 @@ class _VacunasScreenState extends State<VacunasScreen> {
                   mascotaId: mid!, nombre: nomCtrl.text,
                   fecha: fApl, proxima: fPrx,
                 ));
-                setState(() {}); // refrescar lista
+                setState(() {});
                 Navigator.pop(ctx);
                 ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('Vacuna registrada')));
@@ -2824,12 +3289,10 @@ class _VacunasScreenState extends State<VacunasScreen> {
     final app     = widget.app;
     final ahora   = DateTime.now();
 
-    // todas las vacunas, con filtro opcional por mascota
     final todasVac = app.vacunas.where((v) =>
         _filtroMascota == null || v.mascotaId == _filtroMascota).toList()
       ..sort((a, b) => b.fecha.compareTo(a.fecha));
 
-    // proximas a vencer (30 dias)
     final proximas = app.vacunas.where((v) {
       if (v.proxima == null) return false;
       final d = v.proxima!.difference(ahora).inDays;
@@ -2866,7 +3329,6 @@ class _VacunasScreenState extends State<VacunasScreen> {
         padding: const EdgeInsets.fromLTRB(16, 16, 16, 100),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
 
-          // alertas de vacunas proximas
           if (proximas.isNotEmpty) ...[
             Container(
               width: double.infinity,
@@ -2880,7 +3342,7 @@ class _VacunasScreenState extends State<VacunasScreen> {
                 Row(children: [
                   const Icon(Icons.warning_amber, color: Colors.orange, size: 20),
                   const SizedBox(width: 8),
-                  Text('${proximas.length} vacuna${proximas.length > 1 ? 's' : ''} proxima${proximas.length > 1 ? 's' : ''} a vencer',
+                  Text('${proximas.length} vacuna${proximas.length > 1 ? 's' : ''} próxima${proximas.length > 1 ? 's' : ''} a vencer',
                       style: const TextStyle(fontWeight: FontWeight.bold,
                           color: Colors.orange, fontSize: 14)),
                 ]),
@@ -2914,7 +3376,6 @@ class _VacunasScreenState extends State<VacunasScreen> {
             const SizedBox(height: 20),
           ],
 
-          // filtro por mascota
           if (app.mascotas.isNotEmpty) ...[
             SingleChildScrollView(
               scrollDirection: Axis.horizontal,
@@ -2926,14 +3387,12 @@ class _VacunasScreenState extends State<VacunasScreen> {
             const SizedBox(height: 16),
           ],
 
-          // titulo
           Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
             Text('${todasVac.length} vacuna${todasVac.length == 1 ? '' : 's'} registrada${todasVac.length == 1 ? '' : 's'}',
                 style: TextStyle(color: Colors.grey.shade600, fontSize: 13)),
           ]),
           const SizedBox(height: 10),
 
-          // lista de vacunas
           if (todasVac.isEmpty)
             Container(
               width: double.infinity, padding: const EdgeInsets.all(24),
@@ -2949,7 +3408,7 @@ class _VacunasScreenState extends State<VacunasScreen> {
                 const Text('Sin vacunas registradas',
                     style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
                 const SizedBox(height: 4),
-                Text('Toca el boton + para registrar la primera vacuna',
+                Text('Toca el botón + para registrar la primera vacuna',
                     style: TextStyle(color: Colors.grey.shade500, fontSize: 13),
                     textAlign: TextAlign.center),
               ]),
@@ -3000,7 +3459,6 @@ class _VacunasScreenState extends State<VacunasScreen> {
                             style: const TextStyle(
                                 fontWeight: FontWeight.bold, fontSize: 14)),
                         const SizedBox(height: 3),
-                        // mascota con foto
                         Row(children: [
                           if (mascota?.foto != null)
                             CircleAvatar(
@@ -3022,7 +3480,7 @@ class _VacunasScreenState extends State<VacunasScreen> {
                             style: TextStyle(fontSize: 11,
                                 color: Colors.grey.shade500)),
                         if (v.proxima != null)
-                          Text('Proxima: ${v.proxima!.day}/${v.proxima!.month}/${v.proxima!.year}',
+                          Text('Próxima: ${v.proxima!.day}/${v.proxima!.month}/${v.proxima!.year}',
                               style: TextStyle(
                                   fontSize: 11,
                                   color: venceProx
@@ -3049,7 +3507,7 @@ class _VacunasScreenState extends State<VacunasScreen> {
                             vence < 0 ? 'Vencida'
                                 : vence == 0 ? 'Hoy'
                                 : venceProx ? 'en $vence dias'
-                                : 'Al dia',
+                                : 'Al día',
                             style: const TextStyle(color: Colors.white,
                                 fontSize: 10, fontWeight: FontWeight.bold),
                           ),
@@ -3091,7 +3549,7 @@ class _VacunasScreenState extends State<VacunasScreen> {
 }
 
 // ════════════════════════════════════════════════════════════════
-//  EXPEDIENTE CLINICO  (RF16)
+//  EXPEDIENTE CLINICO
 // ════════════════════════════════════════════════════════════════
 
 class ExpedienteScreen extends StatefulWidget {
@@ -3138,17 +3596,14 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
             child: pw.Row(
                 mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                 children: [
-              pw.Text('Clinica Veterinaria  |  Tel: 664-123-4567',
+              pw.Text('Clínica Veterinaria  |  Tel: 664-123-4567',
                   style: pw.TextStyle(fontSize: 9, color: PdfColors.grey)),
               pw.Text('clinica@vet.com',
                   style: pw.TextStyle(fontSize: 9, color: PdfColors.grey)),
             ]),
           ),
           build: (_) => [
-
             pw.SizedBox(height: 16),
-
-            // ── DATOS DEL DUEÑO ───────────────────────────
             _exSec('DATOS DEL CLIENTE'),
             pw.SizedBox(height: 8),
             pw.Container(
@@ -3162,18 +3617,15 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
                   children: [
                 _exFila('Nombre',    u?.nombre    ?? '-'),
                 _exFila('Correo',    u?.email     ?? '-'),
-                _exFila('Telefono',  u?.telefono  ?? '-'),
-                _exFila('Direccion', u?.direccion ?? '-'),
+                _exFila('Teléfono',  u?.telefono  ?? '-'),
+                _exFila('Dirección', u?.direccion ?? '-'),
                 if (u?.fechaNacimiento != null && u!.fechaNacimiento!.isNotEmpty)
                   _exFila('Fecha de nacimiento', u.fechaNacimiento!),
                 if (u?.genero != null && u!.genero!.isNotEmpty)
-                  _exFila('Genero', u.genero!),
+                  _exFila('Género', u.genero!),
               ]),
             ),
-
             pw.SizedBox(height: 20),
-
-            // ── CITAS AGENDADAS ──────────────────────────
             _exSec('CITAS AGENDADAS'),
             pw.SizedBox(height: 8),
             app.citas.isEmpty
@@ -3232,21 +3684,15 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
                       ]),
                     );
                   }).toList()),
-
             pw.SizedBox(height: 20),
-
-            // ── MASCOTAS CON HISTORIAL Y VACUNAS ─────────
             ...app.mascotas.map((m) {
               final visitas = app.visitasDe(m.id);
               final vacunas = app.vacunasDe(m.id);
-
               return pw.Column(
                   crossAxisAlignment: pw.CrossAxisAlignment.start,
                   children: [
                 _exSec('MASCOTA: ${m.nombre.toUpperCase()}'),
                 pw.SizedBox(height: 8),
-
-                // datos mascota
                 pw.Container(
                   padding: const pw.EdgeInsets.all(12),
                   decoration: pw.BoxDecoration(
@@ -3266,9 +3712,7 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
                   ]),
                 ),
                 pw.SizedBox(height: 10),
-
-                // historial medico
-                pw.Text('Historial Medico',
+                pw.Text('Historial Médico',
                     style: pw.TextStyle(
                         fontSize: 11,
                         fontWeight: pw.FontWeight.bold,
@@ -3311,10 +3755,7 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
                                     fontSize: 10, color: PdfColors.grey600)),
                           ]),
                         )).toList()),
-
                 pw.SizedBox(height: 10),
-
-                // vacunas
                 pw.Text('Vacunas',
                     style: pw.TextStyle(
                         fontSize: 11,
@@ -3350,14 +3791,13 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
                                       color: PdfColors.grey700)),
                               if (v.proxima != null)
                                 pw.Text(
-                                    'Proxima: ${v.proxima!.day}/${v.proxima!.month}/${v.proxima!.year}',
+                                    'Próxima: ${v.proxima!.day}/${v.proxima!.month}/${v.proxima!.year}',
                                     style: pw.TextStyle(
                                         fontSize: 9,
                                         color: PdfColors.orange800)),
                             ]),
                           ]),
                         )).toList()),
-
                 pw.SizedBox(height: 20),
               ]);
             }),
@@ -3373,10 +3813,9 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
 
       if (!mounted) return;
       setState(() => _generando = false);
-
       await Share.shareXFiles(
         [XFile(path)],
-        text: 'Expediente Clinico - ${u?.nombre ?? 'Cliente'}',
+        text: 'Expediente Clínico - ${u?.nombre ?? 'Cliente'}',
       );
     } catch (e) {
       if (!mounted) return;
@@ -3386,7 +3825,6 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
     }
   }
 
-  // helpers PDF
   pw.Widget _exSec(String t) => pw.Container(
         width: double.infinity,
         padding: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -3417,8 +3855,7 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
       );
 
   pw.Widget _exChip(String txt) => pw.Container(
-        padding:
-            const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        padding: const pw.EdgeInsets.symmetric(horizontal: 8, vertical: 3),
         decoration: pw.BoxDecoration(
           color: PdfColors.white,
           borderRadius: const pw.BorderRadius.all(pw.Radius.circular(10)),
@@ -3442,7 +3879,7 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
     return Scaffold(
       backgroundColor: kBg,
       appBar: AppBar(
-        title: const Text('Expediente Clinico'),
+        title: const Text('Expediente Clínico'),
         backgroundColor: kPrimary,
         foregroundColor: Colors.white,
         actions: [
@@ -3465,7 +3902,6 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
         padding: const EdgeInsets.all(16),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
 
-          // boton principal
           SizedBox(
             width: double.infinity, height: 52,
             child: ElevatedButton.icon(
@@ -3487,7 +3923,7 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
           const SizedBox(height: 6),
           Center(
             child: Text(
-              'El PDF incluye datos del cliente, citas, historial medico y vacunas',
+              'El PDF incluye datos del cliente, citas, historial médico y vacunas',
               style: TextStyle(fontSize: 11, color: Colors.grey.shade500),
               textAlign: TextAlign.center,
             ),
@@ -3495,7 +3931,6 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
 
           const SizedBox(height: 24),
 
-          // DATOS DEL DUEÑO
           _secCard(
             title: 'Datos del Cliente',
             icon: Icons.person_outline,
@@ -3514,7 +3949,6 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
 
           const SizedBox(height: 16),
 
-          // CITAS
           _secCard(
             title: 'Citas Agendadas (${app.citas.length})',
             icon: Icons.calendar_today,
@@ -3592,7 +4026,6 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
 
           const SizedBox(height: 16),
 
-          // MASCOTAS CON HISTORIAL Y VACUNAS
           ...app.mascotas.map((m) {
             final visitas = app.visitasDe(m.id);
             final vacunas = app.vacunasDe(m.id);
@@ -3604,7 +4037,6 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
                 child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                  // datos mascota
                   Wrap(spacing: 8, runSpacing: 6, children: [
                     _chip('${m.especie}'),
                     _chip('${m.raza}'),
@@ -3614,15 +4046,12 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
                     if (m.microchip != null && m.microchip!.isNotEmpty)
                       _chip('Chip: ${m.microchip}'),
                   ]),
-
                   const SizedBox(height: 14),
                   const Divider(),
-
-                  // historial medico
                   Row(children: [
                     const Icon(Icons.local_hospital, color: kPrimary, size: 16),
                     const SizedBox(width: 6),
-                    Text('Historial Medico (${visitas.length})',
+                    Text('Historial Médico (${visitas.length})',
                         style: const TextStyle(
                             fontWeight: FontWeight.bold, fontSize: 13)),
                   ]),
@@ -3666,11 +4095,8 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
                             ]),
                           )).toList(),
                         ),
-
                   const SizedBox(height: 14),
                   const Divider(),
-
-                  // vacunas
                   Row(children: [
                     const Icon(Icons.vaccines,
                         color: Color(0xFF7B1FA2), size: 16),
@@ -3708,7 +4134,7 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
                                         color: Colors.grey.shade600)),
                                 if (v.proxima != null)
                                   Text(
-                                      'Proxima: ${v.proxima!.day}/${v.proxima!.month}/${v.proxima!.year}',
+                                      'Próxima: ${v.proxima!.day}/${v.proxima!.month}/${v.proxima!.year}',
                                       style: const TextStyle(
                                           fontSize: 10,
                                           color: Colors.orange,
@@ -3786,67 +4212,6 @@ class _ExpedienteScreenState extends State<ExpedienteScreen> {
         child: Text(msg,
             style: TextStyle(fontSize: 12, color: Colors.grey.shade400)),
       );
-}
-
-// ════════════════════════════════════════════════════════════════
-//  DASHBOARD (menu rapido)
-// ════════════════════════════════════════════════════════════════
-
-class DashboardScreen extends StatelessWidget {
-  const DashboardScreen({Key? key}) : super(key: key);
-  @override
-  Widget build(BuildContext context) {
-    final app = Provider.of<AppProvider>(context);
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('Hola ${app.usuarioActual?.nombre ?? ''}'),
-        backgroundColor: kPrimary, foregroundColor: Colors.white,
-      ),
-      backgroundColor: kBg,
-      body: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(mainAxisAlignment: MainAxisAlignment.center, children: [
-          _mb(context, 'Mis Citas',         Icons.calendar_month, const HomeScreen()),
-          const SizedBox(height: 16),
-          _mb(context, 'Registrar Mascota', Icons.pets,            const HomeScreen()),
-          const SizedBox(height: 16),
-          _mb(context, 'Registrar Cita',    Icons.medical_services,const HomeScreen()),
-        ]),
-      ),
-    );
-  }
-  Widget _mb(BuildContext ctx, String t, IconData ic, Widget s) =>
-      ElevatedButton.icon(
-        icon: Icon(ic, size: 24),
-        label: Padding(padding: const EdgeInsets.symmetric(vertical: 14),
-            child: Text(t, style: const TextStyle(fontSize: 16))),
-        style: ElevatedButton.styleFrom(
-            backgroundColor: kPrimary, foregroundColor: Colors.white,
-            minimumSize: const Size(double.infinity, 56),
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16))),
-        onPressed: () => Navigator.push(ctx, MaterialPageRoute(builder: (_) => s)),
-      );
-}
-
-// ════════════════════════════════════════════════════════════════
-//  SUBIR FOTO (camara)
-// ════════════════════════════════════════════════════════════════
-
-class SubirFotoWidget extends StatefulWidget {
-  const SubirFotoWidget({Key? key}) : super(key: key);
-  @override _SubirFotoWidgetState createState() => _SubirFotoWidgetState();
-}
-class _SubirFotoWidgetState extends State<SubirFotoWidget> {
-  File? _img; final _pk = ImagePicker();
-  Future<void> _foto() async {
-    final f = await _pk.pickImage(source: ImageSource.camera);
-    if (f != null) setState(() => _img = File(f.path));
-  }
-  @override
-  Widget build(BuildContext context) => Column(children: [
-    ElevatedButton(onPressed: _foto, child: const Text('Tomar foto')),
-    if (_img != null) Image.file(_img!, height: 200),
-  ]);
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -3933,15 +4298,15 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   await Supabase.initialize(
-    url:     'https://knidpuslwnbrcymbirwh.supabase.co',  
-    anonKey: 'sb_publishable_NWbhMTEqrDCOCCS1xJEnQA_bCUr4bb2'                       // ← reemplaza con tu anon key
+    url:     'https://knidpuslwnbrcymbirwh.supabase.co',
+    anonKey: 'sb_publishable_NWbhMTEqrDCOCCS1xJEnQA_bCUr4bb2'
   );
 
   runApp(ChangeNotifierProvider(
     create: (_) => AppProvider(),
     child: MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Clinica Veterinaria',
+      title: 'Clínica Veterinaria',
       theme: ThemeData(
         primaryColor: kPrimary,
         scaffoldBackgroundColor: kBg,
