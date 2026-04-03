@@ -10,6 +10,7 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  http: ^0.13.6
 
   # ── Ya tenías estas ──────────────────────────
   provider: ^6.0.5
@@ -24,9 +25,8 @@ dependencies:
   pdf: ^3.10.8               # RF14 – generar PDF del comprobante
   path_provider: ^2.1.2      # RF14 – guardar PDF en el dispositivo
   open_file: ^3.3.2  
-  share_plus: ^7.2.2   
-  supabase_flutter: ^2.5.0 
-      # RF14 – abrir el PDF generado
+  share_plus: ^7.2.2
+  shared_preferences: ^2.2.3
 
 dev_dependencies:
   flutter_test:
