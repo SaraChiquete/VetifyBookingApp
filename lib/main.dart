@@ -254,6 +254,16 @@ class ApiService {
     throw Exception('Error veterinarios: ${res.statusCode}');
   }
 
+  static Future<List<String>> getAvailableSlots(int vetId, String date) async {
+    final res = await http.get(
+        Uri.parse('$baseUrl/available_slots/?vet_id=$vetId&date=$date'), headers: _headers);
+    if (res.statusCode == 200) {
+      final data = json.decode(res.body);
+      return List<String>.from(data['available_slots']);
+    }
+    throw Exception('Error available slots: ${res.statusCode}');
+  }
+
   // ── CONSULTAS ────────────────────────────────────
 
   static Future<List<dynamic>> getConsultas() async {
@@ -278,6 +288,17 @@ class ApiService {
         headers: _headers, body: json.encode(data));
     if (res.statusCode != 200) {
       throw Exception(formatApiError(res.body));
+    }
+  }
+
+  static Future<void> updateAvatar(String imagePath) async {
+    final uri = Uri.parse('$baseUrl/profile/avatar/');
+    final request = http.MultipartRequest('POST', uri);
+    request.headers.addAll(_headers);
+    request.files.add(await http.MultipartFile.fromPath('avatar', imagePath));
+    final res = await request.send();
+    if (res.statusCode != 200) {
+      throw Exception('Error updating avatar: ${res.statusCode}');
     }
   }
 
@@ -532,6 +553,7 @@ class AppProvider with ChangeNotifier {
   List<AppNotificacion> notificaciones = [];
   /// Horarios de la clínica desde el API (RF-06)
   List<Map<String, dynamic>> horariosClinica = [];
+  List<String> availableSlots = [];  // RF-06: Horarios disponibles
   Usuario? usuarioActual;
   bool cargando = false;
 
@@ -573,7 +595,6 @@ class AppProvider with ChangeNotifier {
         password: password,
         passwordConfirm: passwordConfirm,
         phone: phone,
-        firstName: firstName,
       );
       if (err != null) return err;
       final nombreMostrar =
@@ -610,6 +631,18 @@ class AppProvider with ChangeNotifier {
       notifyListeners();
     } catch (e) {
       debugPrint('Error veterinarios: $e');
+    }
+  }
+
+  Future<void> cargarAvailableSlots(int vetId, DateTime date) async {
+    try {
+      final dateStr = '${date.year}-${date.month.toString().padLeft(2,'0')}-${date.day.toString().padLeft(2,'0')}';
+      availableSlots = await ApiService.getAvailableSlots(vetId, dateStr);
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Error available slots: $e');
+      availableSlots = [];  // Fallback to empty
+      notifyListeners();
     }
   }
 
@@ -996,10 +1029,10 @@ class _LoginScreenState extends State<LoginScreen> {
                     child: const Text(
                       '¿No tienes cuenta? Crear cuenta',
                       style: TextStyle(
-                        color: Colors.white,
+                        color: Colors.blue,
                         fontWeight: FontWeight.w600,
                         decoration: TextDecoration.underline,
-                        decorationColor: Colors.white,
+                        decorationColor: Colors.blue,
                       ),
                     ),
                   ),
@@ -1026,7 +1059,6 @@ class RegisterScreen extends StatefulWidget {
 class _RegisterScreenState extends State<RegisterScreen> {
   final _userCtrl = TextEditingController();
   final _emailCtrl = TextEditingController();
-  final _nombreCtrl = TextEditingController();
   final _telCtrl = TextEditingController();
   final _passCtrl = TextEditingController();
   final _pass2Ctrl = TextEditingController();
@@ -1037,7 +1069,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
     for (final c in [
       _userCtrl,
       _emailCtrl,
-      _nombreCtrl,
       _telCtrl,
       _passCtrl,
       _pass2Ctrl
@@ -1097,12 +1128,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
                         textAlign: TextAlign.center,
                       ),
                       const SizedBox(height: 20),
-                      _tf(_userCtrl, 'Usuario *', Icons.person_outline),
+                      _tf(_userCtrl, 'Nombre de usuario *', Icons.person_outline),
                       const SizedBox(height: 10),
                       _tf(_emailCtrl, 'Correo *', Icons.email_outlined),
-                      const SizedBox(height: 10),
-                      _tf(_nombreCtrl, 'Nombre (opcional)',
-                          Icons.badge_outlined),
                       const SizedBox(height: 10),
                       _tf(_telCtrl, 'Teléfono (opcional)', Icons.phone_outlined),
                       const SizedBox(height: 10),
@@ -1145,9 +1173,6 @@ class _RegisterScreenState extends State<RegisterScreen> {
                                 phone: _telCtrl.text.trim().isEmpty
                                     ? null
                                     : _telCtrl.text.trim(),
-                                firstName: _nombreCtrl.text.trim().isEmpty
-                                    ? null
-                                    : _nombreCtrl.text.trim(),
                               );
                               if (!context.mounted) return;
                               setState(() => _loading = false);
@@ -1833,6 +1858,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 )).toList(),
                 onChanged: (v) => setState(() {
                   _veterinarioCitaId = v; _horaCita = '';
+                  if (v != null) app.cargarAvailableSlots(v, _fechaCita);
                 }),
               ),
         const SizedBox(height: 20),
@@ -1848,7 +1874,9 @@ class _HomeScreenState extends State<HomeScreen> {
               firstDate: DateTime.now(),
               lastDate: DateTime(2030),
               onDateChanged: (d) =>
-                  setState(() { _fechaCita = d; _horaCita = ''; }),
+                  setState(() { _fechaCita = d; _horaCita = '';
+                    if (_veterinarioCitaId != null) app.cargarAvailableSlots(_veterinarioCitaId!, d);
+                  }),
             ),
           ),
         ),
@@ -3256,6 +3284,50 @@ class _PerfilScreenState extends State<PerfilScreen> {
     super.dispose();
   }
 
+  Future<void> _pickImage(ImageSource source) async {
+    final picker = ImagePicker();
+    final pickedFile = await picker.pickImage(source: source, imageQuality: 80);
+    if (pickedFile != null) {
+      try {
+        await ApiService.updateAvatar(pickedFile.path);
+        _snack(context, 'Foto de perfil actualizada');
+        // Recargar perfil o algo
+      } catch (e) {
+        _snack(context, 'Error al actualizar foto: $e');
+      }
+    }
+  }
+
+  void _showImageSourceDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Seleccionar imagen'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_library),
+              title: const Text('Galería'),
+              onTap: () {
+                Navigator.pop(context);
+                _pickImage(ImageSource.gallery);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.camera_alt),
+              title: const Text('Cámara'),
+              onTap: () {
+                Navigator.pop(context);
+                _pickImage(ImageSource.camera);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final app = widget.app;
@@ -3288,8 +3360,11 @@ class _PerfilScreenState extends State<PerfilScreen> {
             width: double.infinity, padding: const EdgeInsets.all(24),
             decoration: _cardDeco(),
             child: Column(children: [
-              const CircleAvatar(radius: 52, backgroundColor: Color(0xFFE3F2FD),
-                  child: Icon(Icons.person, size: 50, color: kPrimary)),
+              GestureDetector(
+                onTap: _showImageSourceDialog,
+                child: const CircleAvatar(radius: 52, backgroundColor: Color(0xFFE3F2FD),
+                    child: Icon(Icons.person, size: 50, color: kPrimary)),
+              ),
               const SizedBox(height: 12),
               Text(u?.nombre ?? 'Usuario',
                   style: const TextStyle(fontSize: 20,
